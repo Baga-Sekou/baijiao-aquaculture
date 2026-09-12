@@ -100,6 +100,7 @@ def seed_tasks(db, pond_id, batch_id, terminal_id, device_id, user_id, count=8):
             dispatched_at=ts + timedelta(seconds=5),
             started_at=ts + timedelta(seconds=8),
             finished_at=ts + timedelta(seconds=60),
+            created_at=ts, updated_at=ts + timedelta(seconds=60),
             device_locked=False)
         db.add(task); db.flush()
         db.add(Receipt(task_id=task.id, kind="accept", status="accepted", seq=1,

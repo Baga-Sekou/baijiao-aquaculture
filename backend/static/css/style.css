@@ -115,6 +115,17 @@ label.fld { display: block; font-size: 12.5px; color: var(--muted); margin-botto
   background: #26323d; color: #8fa1b0; font-size: 13px;
 }
 .cam.off { background: repeating-linear-gradient(45deg,#2c3944,#2c3944 10px,#333f4a 10px,#333f4a 20px); color: #f0c36d; }
+.cam-frame {
+  width: 100%; max-width: 340px; border-radius: 8px; display: block;
+  background: #0b1f33; min-height: 90px; object-fit: cover;
+}
+/* 表格在窄屏放入自身横向滚动，避免把页面撑破 */
+@media (max-width: 900px) {
+  table { display: block; overflow-x: auto; white-space: nowrap; }
+  .nav { overflow-x: auto; flex-wrap: nowrap; }
+  .nav a { white-space: nowrap; }
+  .brand-text { white-space: nowrap; }
+}
 .tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
 .tab { padding: 5px 13px; border-radius: 7px; cursor: pointer; background: #fff; border: 1px solid var(--line); }
 .tab.on { background: var(--navy); color: #fff; border-color: var(--navy); }

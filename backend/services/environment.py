@@ -6,6 +6,7 @@
 - 缺测不补零；不能用当前温度代替全天变化。
 - 断线补传保留原采集时间，区分采集时间与补传时间。
 """
+import math
 from datetime import datetime, timedelta
 
 from sqlalchemy import func
@@ -47,19 +48,26 @@ def ingest(db, payload):
         value = float(payload.get("value"))
     except (TypeError, ValueError):
         return None, "value 必须是数值"
+    if not math.isfinite(value):
+        return None, "value 必须是有限数值（不能为 NaN/Infinity）"
     unit = payload.get("unit") or ""
 
-    # 采集时间：缺失或不可解析 -> 拒绝（不静默用当前时间顶替）
+    # 采集时间：必须是 ISO 字符串或 datetime；缺失/不可解析/未来时间都拒绝
     raw_ts = payload.get("collected_at")
     if not raw_ts:
         return None, "缺少采集时间 collected_at"
-    try:
-        if isinstance(raw_ts, str):
+    if isinstance(raw_ts, str):
+        try:
             collected = datetime.fromisoformat(raw_ts.replace("Z", "").replace("T", " "))
-        else:
-            collected = raw_ts
-    except ValueError:
+        except ValueError:
+            return None, "采集时间格式不正确"
+    elif isinstance(raw_ts, datetime):
+        collected = raw_ts
+    else:
         return None, "采集时间格式不正确"
+    if collected > now() + timedelta(minutes=5):
+        return None, ("采集时间来自未来，已拒绝（设备时钟可能异常，"
+                      "请校时后重新上传）")
 
     device = None
     if payload.get("device_code"):

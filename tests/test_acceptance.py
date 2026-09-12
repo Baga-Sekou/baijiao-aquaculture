@@ -432,7 +432,7 @@ def s_plan_ops():
     call("POST", "/api/receipts", json={"task_no": t["data"]["task_no"], "kind": "finish",
                                         "status": "done", "actual_amount": 88.8})
     _, fs = call("GET", "/api/ponds/1/feed-stats?days=60", user="owner")
-    fcr_ok = fs["data"]["fcr"] is not None and "饲料消耗" in fs["data"]["fcr_note"]
+    fcr_ok = fs["data"]["fcr"] is not None and "用料" in fs["data"]["fcr_note"]
     # 用药与成本
     _, m = call("POST", "/api/ponds/1/medicine", user="wang",
                 json={"item": "聚维酮碘", "amount": 2.5, "unit": "L"})
@@ -573,6 +573,177 @@ def s_community():
           f"A01 FCR={a01.get('fcr')}（{a01.get('fcr_basis')}）；A02 未参与原因：{a02.get('not_ranked_reason')}")
 
 
+
+def s_auth_binding():
+    """越权绑定：URL 鱼塘与建议所属鱼塘必须一致；告警/日志同样校验权限。"""
+    reset()
+    seed_env(2, 26.5)
+    _, s2 = call("POST", "/api/ponds/2/suggestions", user="owner", json={})
+    code2 = s2["data"]["code"]
+    c1, d1 = call("GET", f"/api/suggestions/{code2}", user="wang")
+    c2, d2 = call("POST", "/api/ponds/1/tasks", user="wang",
+                  json={"request_no": "REQ-X-" + uuid.uuid4().hex[:8],
+                        "suggestion_code": code2})
+    call("POST", "/api/measurements", json={
+        "pond_id": 2, "metric": "temperature", "value": 99.0, "unit": "℃",
+        "collected_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    _, al = call("GET", "/api/alerts", user="owner")
+    a2 = next((a for a in al["data"] if a["pond_id"] == 2), None)
+    c3, d3 = call("POST", f"/api/alerts/{a2['id']}/handle", user="wang",
+                  json={"status": "closed"}) if a2 else (0, {})
+    c4, d4 = call("GET", "/api/logs?pond_id=2", user="wang")
+    passed = (c1 == 403 and c2 == 403 and c3 == 403 and c4 == 403
+              and not d1.get("ok") and not d2.get("ok"))
+    check("跨塘越权", "仅 A01 权限用户用 A02 建议下发任务/读建议/关告警/读日志",
+          "建议详情、任务创建、告警处理、日志查询均拒绝并返回原因", passed,
+          f"读建议 {c1}，跨塘下发 {c2}，关告警 {c3}，读日志 {c4}（均应 403）")
+
+
+def s_running_timeout():
+    """执行中失联：running 阶段超时同样进入待核查。"""
+    reset()
+    tn = make_task("REQ-RT")
+    call("POST", "/api/receipts", json={"task_no": tn, "kind": "accept",
+                                        "status": "accepted"})
+    call("PUT", "/api/config/task_timeout_sec", user="owner", json={"value": "0"})
+    time.sleep(1.4)
+    _, c = call("POST", "/api/tasks/check-timeouts")
+    call("PUT", "/api/config/task_timeout_sec", user="owner", json={"value": "120"})
+    _, d = call("GET", f"/api/tasks/{tn}", user="owner")
+    td = d["data"]
+    passed = td["status"] == "unknown" and td["device_locked"] is True
+    check("执行中超时", "终端 accept 后失联，触发超时巡检",
+          "running 阶段超时同样转待核查并保留设备占用，不自动重发", passed,
+          f"状态={td['status']}，占用={td['device_locked']}，"
+          f"巡检 timed_out={c['data']['timed_out']}")
+
+
+def s_out_of_order_receipt():
+    """乱序回执：done 之后补发 execute/running 不回退状态。"""
+    reset()
+    tn = make_task("REQ-OO")
+    call("POST", "/api/receipts", json={"task_no": tn, "kind": "finish",
+                                        "status": "done", "actual_amount": 9.0})
+    call("POST", "/api/receipts", json={"task_no": tn, "kind": "execute",
+                                        "status": "running"})
+    _, d = call("GET", f"/api/tasks/{tn}", user="owner")
+    td = d["data"]
+    passed = (td["status"] == "done" and td["device_locked"] is False
+              and td["finished_at"] is not None
+              and len(td["receipts"]) >= 2)
+    check("乱序回执", "先 finish/done 再补发 execute/running",
+          "迟到过程回执留痕但不把已完成任务改回执行中", passed,
+          f"状态={td['status']}（应保持 done），占用={td['device_locked']}，"
+          f"回执 {len(td['receipts'])} 条留痕")
+
+
+def s_cancel_suggestion():
+    """取消建议：真正取消，且不能再下发任务。"""
+    reset()
+    seed_env()
+    sg = fresh_suggestion(user="owner")
+    code = sg["code"]
+    _, r1 = call("POST", f"/api/suggestions/{code}/cancel", user="owner", json={})
+    c2, r2 = call("POST", f"/api/suggestions/{code}/cancel", user="owner", json={})
+    c3, r3 = call("POST", "/api/ponds/1/tasks", user="owner",
+                  json={"request_no": "REQ-CX-" + uuid.uuid4().hex[:8],
+                        "suggestion_code": code})
+    passed = (r1.get("ok") and r1["data"]["status"] == "cancelled"
+              and c2 == 409 and c3 == 400 and not r3.get("ok"))
+    check("取消建议", "取消待确认建议后重复取消并用其下发任务",
+          "状态转 cancelled；重复取消被拒；已取消建议不能再下发任务", passed,
+          f"取消后状态={r1['data']['status']}，重复取消 HTTP {c2}，"
+          f"下发 HTTP {c3}（{r3.get('message')}）")
+
+
+def s_input_validation():
+    """输入校验：未来时间/非法数值/非法状态/坏参数都给 400/404，不再 500。"""
+    reset()
+    c1, _ = call("POST", "/api/measurements", json={
+        "pond_id": 1, "metric": "temperature", "value": 25.0, "unit": "℃",
+        "collected_at": "2099-01-01 00:00:00"})
+    c2, _ = call("POST", "/api/measurements", json={
+        "pond_id": 1, "metric": "temperature", "value": "NaN", "unit": "℃",
+        "collected_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    c3, _ = call("GET", "/api/compare?days=abc", user="owner")
+    c4, _ = call("GET", "/api/ponds/1/charts?days=abc", user="owner")
+    c5, _ = call("GET", "/api/ponds/999/dashboard", user="owner")
+    reset()
+    seed_env()
+    sg = fresh_suggestion(user="owner")
+    _, t = call("POST", "/api/ponds/1/tasks", user="owner",
+                json={"request_no": "REQ-V-" + uuid.uuid4().hex[:8],
+                      "suggestion_code": sg["code"]})
+    tn = t["data"]["task_no"]
+    c6, _ = call("POST", "/api/receipts", json={"task_no": tn, "kind": "finish",
+                                                "status": "garbage"})
+    c7, _ = call("POST", "/api/receipts", json={"task_no": tn, "kind": "finish",
+                                                "status": "done", "actual_amount": -9})
+    _, td = call("GET", f"/api/tasks/{tn}", user="owner")
+    passed = (c1 == 400 and c2 == 400 and c3 == 400 and c4 == 400
+              and c5 == 404 and c6 == 400 and c7 == 400
+              and td["data"]["status"] == "dispatched")
+    check("输入校验", "未来采集时间/NaN/坏 days/不存在鱼塘/非法回执/负实测量",
+          "全部返回 400/404 并给出原因，任务状态不被非法回执改变", passed,
+          f"未来时间 {c1}，NaN {c2}，days {c3}/{c4}，缺塘 {c5}，"
+          f"非法状态 {c6}，负实测量 {c7}，任务保持 {td['data']['status']}")
+
+
+def s_fcr_consistency():
+    """FCR 口径：失败任务与称重区间外的投喂不计入，各页面数值一致。"""
+    reset()
+    from database import SessionLocal
+    from models import FeedingTask, WeighRecord
+    from datetime import datetime, timedelta
+    today = datetime.now()
+    db = SessionLocal()
+    try:
+        for d, w in ((20, 100.0), (10, 200.0)):
+            db.add(WeighRecord(pond_id=2, weighed_at=today - timedelta(days=d),
+                               avg_weight=w, sample_count=30, note="FCR口径测试"))
+        for d, amt, st in ((12, 60, "done"), (11, 40, "done"), (5, 500, "failed")):
+            ts = today - timedelta(days=d)
+            db.add(FeedingTask(
+                task_no=f"TK-FCR-{d}", request_no=f"REQ-FCR-{d}", pond_id=2,
+                suggested_amount=amt, confirm_amount=amt, unit="kg",
+                status=st, device_locked=False, approved_at=ts, created_at=ts,
+                finished_at=ts))
+        db.commit()
+    finally:
+        db.close()
+    _, fs = call("GET", "/api/ponds/2/feed-stats?days=30", user="owner")
+    _, lb = call("GET", "/api/leaderboard?days=30", user="owner")
+    a02 = next((x for x in lb["data"] if x["pond"]["code"] == "A02"), {})
+    expected = round(100 / 6200, 3)
+    passed = (fs["data"]["fcr"] == expected
+              and fs["data"]["feed_window_kg"] == 100.0
+              and a02.get("fcr") == expected)
+    check("FCR口径", "两次称重间完成 100kg、之后失败 500kg，查 feed-stats 与排行榜",
+          "失败任务不计入用料；分子限称重区间；两页面 FCR 一致", passed,
+          f"feed-stats FCR={fs['data']['fcr']}（期望 {expected}），"
+          f"用料={fs['data']['feed_window_kg']}kg，排行榜 A02 FCR={a02.get('fcr')}")
+
+
+def s_concurrent_suggestions():
+    """并发生成建议：编号不冲突，全部成功。"""
+    reset()
+    seed_env(1, 26.5)
+    from concurrent.futures import ThreadPoolExecutor
+    import requests as rq
+    def post(_):
+        r = rq.post(BASE + "/api/ponds/1/suggestions",
+                    headers={"X-User": "owner"}, timeout=15)
+        return r.status_code
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        codes = list(ex.map(post, range(16)))
+    ok_n = sum(1 for c in codes if c == 200)
+    passed = ok_n == 16
+    check("并发建议", "8 线程并发 16 次生成建议",
+          "编号生成并发安全，全部 HTTP 200", passed,
+          f"成功 {ok_n}/16，失败状态码：{sorted(set(c for c in codes if c != 200)) or '无'}")
+
+
+
 def main():
     print("=" * 78)
     print("白蕉水产养殖管理平台 · 验收场景测试")
@@ -581,8 +752,10 @@ def main():
     for fn in (s_terminal_register, s_env_upload, s_data_invalid, s_day_features,
                s_temp_driven, s_normal_feed, s_duplicate_submit, s_receipt_timeout,
                s_review_recover, s_late_receipt, s_actual_unknown, s_stop_and_fault,
-               s_permission, s_model_interface, s_fish_event, s_compare,
-               s_plan_ops, s_community, s_vision, s_data_import):
+               s_permission, s_auth_binding, s_running_timeout, s_out_of_order_receipt,
+               s_cancel_suggestion, s_input_validation, s_model_interface,
+               s_fish_event, s_compare, s_plan_ops, s_fcr_consistency,
+               s_community, s_concurrent_suggestions, s_vision, s_data_import):
         try:
             fn()
         except Exception as e:

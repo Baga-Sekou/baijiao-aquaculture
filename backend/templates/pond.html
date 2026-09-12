@@ -147,7 +147,7 @@ async function loadToday() {
   const today = d.data.today || {};
   // 任务完成率：done / 今日全部任务
   const tr = await API.get(`/api/ponds/${POND}/tasks`);
-  const todays = (tr.ok ? tr.data : []).filter(t => (t.approved_at || '').startsWith(new Date().toISOString().slice(0, 10)));
+  const todays = (tr.ok ? tr.data : []).filter(t => (t.approved_at || '').startsWith(localToday()));
   const doneN = todays.filter(t => t.status === 'done').length;
   // 周均日投喂作为今日参考线
   const byDay = {};
@@ -183,16 +183,21 @@ async function loadCams() {
   const r = await API.get(`/api/ponds/${POND}/cameras`);
   if (!r.ok) return;
   if (!r.data.length) { $('#cams').innerHTML = '<div class="empty">该鱼塘未接入相机</div>'; return; }
-  $('#cams').innerHTML = r.data.map(c => `
-    <div>
-      <div class="cam ${c.online ? '' : 'off'}">
-        ${c.online ? `${esc(c.position)}画面` : '画面不可用'}
-      </div>
+  $('#cams').innerHTML = r.data.map(c => {
+    let frame = `<div class="cam ${c.online ? '' : 'off'}">
+      ${c.online ? `${esc(c.position)}画面` : '画面不可用'}</div>`;
+    if (c.online && c.image_path) {
+      frame = `<img class="cam-frame" src="/${esc(c.image_path)}" alt="${esc(c.position)}最新画面">
+        <p class="muted" style="margin:2px 0 0">最新帧 ${fmtTime(c.last_frame_at)}（非实时视频流）</p>`;
+    }
+    return `<div>
+      ${frame}
       <p class="muted" style="margin:6px 0 0">
         ${esc(c.position)}相机 · ${c.online ? '在线' : '<span class="pill bad">离线</span>'}
-        ${c.online ? fmtTime(c.last_frame_at) : '— 不以旧截图表示正常'}
+        ${c.online ? '' : '— 不以旧截图表示正常'}
       </p>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 async function loadTasks() {
@@ -252,7 +257,9 @@ function renderSuggestion(sg) {
     </div>`;
   $('#btnConfirm').onclick = confirmSuggest;
   $('#btnCancel').onclick = async () => {
-    await API.get(`/api/suggestions/${sg.code}`);
+    const r = await API.post(`/api/suggestions/${sg.code}/cancel`);
+    if (!r.ok) { toast(r.message || '取消失败', 'err'); return; }
+    SUGGESTION = null;
     toast('已取消本次建议（不创建投喂任务）', 'ok');
     $('#suggestBox').innerHTML = '';
   };
@@ -260,8 +267,15 @@ function renderSuggestion(sg) {
 
 async function suggest() {
   const btn = $('#btnSuggest'); btn.disabled = true; btn.textContent = '生成中…';
+  try {
+    await suggestInner(btn);
+  } finally {
+    btn.disabled = false; btn.textContent = '生成投喂建议';
+  }
+}
+
+async function suggestInner() {
   const r = await API.post(`/api/ponds/${POND}/suggestions`, {});
-  btn.disabled = false; btn.textContent = '生成投喂建议';
   if (!r.ok) {
     $('#suggestBox').innerHTML = `<div class="reason" style="border-color:#e04b4b">
       <b>未生成有效建议</b><br>${esc(r.message)}</div>`;
@@ -302,7 +316,8 @@ async function loadEvents() {
       <td>${e.status === 'pending'
         ? `<button class="btn sm" onclick="evAct('${esc(e.code)}','confirm')">确认</button>
            <button class="btn sm gray" onclick="evAct('${esc(e.code)}','false_alarm')">误报</button>`
-        : `<button class="btn sm gray" onclick="evAct('${esc(e.code)}','process')">标记已处理</button>`}</td>
+        : (e.status === 'processing'
+          ? `<button class="btn sm gray" onclick="evAct('${esc(e.code)}','process')">标记已处理</button>` : '')}</td>
     </tr>`).join('')}</tbody></table>`;
 }
 
@@ -440,8 +455,14 @@ document.addEventListener('DOMContentLoaded', () => {
   };
   $('#btnTrain').onclick = async () => {
     const btn = $('#btnTrain'); btn.disabled = true; btn.textContent = '训练中…';
+    try {
+      await trainInner(btn);
+    } finally {
+      btn.disabled = false; btn.textContent = '训练模型';
+    }
+  };
+  async function trainInner() {
     const r = await API.post(`/api/ponds/${POND}/model/train`, { target: 'all' });
-    btn.disabled = false; btn.textContent = '训练模型';
     if (!r.ok) { toast(r.message, 'err'); return; }
     const parts = ['growth', 'feed', 'water_quality'].map(t =>
       `${({growth: '生长', feed: '投喂', water_quality: '水质'})[t]}：${r.data[t].ok ? '✓ ' + r.data[t].version : '✗ ' + r.data[t].message}`);

@@ -129,6 +129,8 @@ def handle_alert(alert_id):
     a = g.db.query(Alert).filter_by(id=alert_id).first()
     if not a:
         return fail("告警不存在", 404)
+    if a.pond_id is not None and not can_view(g.db, g.user, a.pond_id):
+        return fail("无权处理该告警", 403)
     body = request.get_json(silent=True) or {}
     a.status = body.get("status", "closed")
     a.handled_by = g.user.id

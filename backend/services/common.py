@@ -3,9 +3,10 @@ import json
 from datetime import datetime, timedelta
 
 from flask import jsonify
-from sqlalchemy import func
+from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 
-from models import AuditLog, Pond, PondGrant, SysConfig, Terminal, User
+from models import AuditLog, Pond, PondGrant, SysConfig, Terminal, User, WeighRecord
 
 
 # ---------------------------------------------------------------- 时间
@@ -41,6 +42,45 @@ def next_code(db, model, field, prefix, width=4):
 def cfg(db, key, default=None):
     row = db.query(SysConfig).filter_by(key=key).first()
     return row.value if row else default
+
+
+def weight_series(db, pond_id, batch=None):
+    """某塘（可选限定批次）的有效称重序列 [(datetime, avg_weight)]，按时间升序。
+
+    批次规则：只取「本批次 + 未归属批次但投苗之后」的记录，
+    避免把上一批（如 CSV 历史数据）的体重接成同一条生长曲线；
+    手工登记的称重常不带批次，故不能只按 batch_id 过滤。
+    建议、模型训练、FCR 统计共用本口径。
+    """
+    q = (db.query(WeighRecord)
+         .filter(WeighRecord.pond_id == pond_id,
+                 WeighRecord.avg_weight.isnot(None)))
+    if batch is not None:
+        q = q.filter(or_(WeighRecord.batch_id == batch.id,
+                         WeighRecord.batch_id.is_(None)))
+    rows = q.order_by(WeighRecord.weighed_at).all()
+    out = [(r.weighed_at, r.avg_weight) for r in rows]
+    if batch is not None and batch.stock_date:
+        out = [(t, w) for t, w in out if t >= batch.stock_date]
+    return out
+
+
+def commit_with_code_retry(db, build, attempts=4):
+    """提交并在编号唯一冲突时重试（并发安全）。
+
+    build(attempt) 每次重建待写对象（回滚后挂起对象会被移出会话），
+    返回 (obj, result)；全部尝试失败时抛出最后一次异常。
+    """
+    for attempt in range(attempts):
+        obj, result = build(attempt)
+        try:
+            db.commit()
+            return obj, result
+        except IntegrityError:
+            db.rollback()
+            if attempt == attempts - 1:
+                raise
+    raise RuntimeError("unreachable")
 
 
 def cfg_float(db, key, default=None):

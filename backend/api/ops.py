@@ -13,6 +13,20 @@ from services.serialize import row
 bp = Blueprint("ops", __name__)
 
 
+def _days_param(default=7, lo=1, hi=3650):
+    """解析 days 查询参数；非法值返回 (None, 错误响应)。"""
+    raw = request.args.get("days")
+    if raw is None:
+        return default, None
+    try:
+        v = int(raw)
+    except ValueError:
+        return None, fail("days 必须是整数", 400)
+    if not (lo <= v <= hi):
+        return None, fail(f"days 取值范围 {lo}~{hi}", 400)
+    return v, None
+
+
 # ---------------------------------------------------------------- 单塘首页
 @bp.get("/ponds/<int:pond_id>/dashboard")
 def dashboard(pond_id):
@@ -23,6 +37,8 @@ def dashboard(pond_id):
     from services import environment as env
 
     p = g.db.query(Pond).filter_by(id=pond_id).first()
+    if not p:
+        return fail("鱼塘不存在", 404)
     b = (g.db.query(Batch).filter_by(pond_id=pond_id, status="active")
          .order_by(Batch.id.desc()).first())
 
@@ -42,8 +58,9 @@ def dashboard(pond_id):
     tasks_today = (g.db.query(FeedingTask)
                    .filter(FeedingTask.pond_id == pond_id,
                            FeedingTask.created_at >= start).all())
+    # 已确认投喂量只累计落定任务（done/stopped）；未完成/失败不计入用料
     fed_today = sum(t.confirm_amount or 0 for t in tasks_today
-                    if t.status in ("done", "stopped", "running", "dispatched"))
+                    if t.status in ("done", "stopped"))
 
     alerts = (g.db.query(Alert)
               .filter(Alert.pond_id == pond_id, Alert.status.in_(["open", "processing"]))
@@ -83,7 +100,9 @@ def _online_users(db, minutes=30):
 def compare():
     if not g.user:
         return fail("未提供有效身份", 401)
-    days = int(request.args.get("days", 7))
+    days, err = _days_param(default=7)
+    if err:
+        return err
     since = now() - timedelta(days=days)
     out = []
     for p in g.db.query(Pond).order_by(Pond.code).all():
@@ -98,7 +117,8 @@ def compare():
             Measurement.pond_id == p.id, Measurement.metric == "oxygen",
             Measurement.valid.is_(True), Measurement.collected_at >= since).scalar()
         feed = g.db.query(func.sum(FeedingTask.confirm_amount)).filter(
-            FeedingTask.pond_id == p.id, FeedingTask.created_at >= since).scalar()
+            FeedingTask.pond_id == p.id, FeedingTask.created_at >= since,
+            FeedingTask.status.in_(["done", "stopped"])).scalar()
         alerts = g.db.query(func.count(Alert.id)).filter(
             Alert.pond_id == p.id, Alert.created_at >= since).scalar()
         meds = g.db.query(func.count(MedicineRecord.id)).filter(
@@ -126,7 +146,9 @@ def charts(pond_id):
         return fail("未提供有效身份", 401)
     if not can_view(g.db, g.user, pond_id):
         return fail("无权访问该鱼塘", 403)
-    days = int(request.args.get("days", 30))
+    days, err = _days_param(default=30)
+    if err:
+        return err
     since = now() - timedelta(days=days)
 
     def series(metric):
@@ -289,14 +311,18 @@ def feed_stats(pond_id):
         return fail("未提供有效身份", 401)
     if not can_view(g.db, g.user, pond_id):
         return fail("无权访问该鱼塘", 403)
-    days = int(request.args.get("days", 30))
+    days, err = _days_param(default=30)
+    if err:
+        return err
     since = now() - timedelta(days=days)
     today = datetime.now().date()
     t0 = datetime.combine(today, datetime.min.time())
 
     def feed_sum(start):
+        # 用料口径：确认量 + 只计落定状态（done/stopped），与其他页面一致
         v = (g.db.query(func.sum(FeedingTask.confirm_amount))
-             .filter(FeedingTask.pond_id == pond_id, FeedingTask.created_at >= start)
+             .filter(FeedingTask.pond_id == pond_id, FeedingTask.created_at >= start,
+                     FeedingTask.status.in_(["done", "stopped"]))
              .scalar())
         return round(v, 2) if v else 0.0
 
@@ -304,7 +330,8 @@ def feed_stats(pond_id):
     feed_window = feed_sum(since)
 
     # 饲料系数：需有效增重（两次称重）；只取本批次（含未归属批次但投苗之后），
-    # 避免把上一批（如 CSV 历史数据）的体重接进同一条增重曲线
+    # 避免把上一批（如 CSV 历史数据）的体重接进同一条增重曲线。
+    # 分子限定为两次称重区间内的用料，与分母增重覆盖相同时间区间。
     batch = (g.db.query(Batch).filter_by(pond_id=pond_id, status="active")
              .order_by(Batch.id.desc()).first())
     weighs_q = (g.db.query(WeighRecord).filter_by(pond_id=pond_id))
@@ -322,12 +349,15 @@ def feed_stats(pond_id):
             gain_kg = (last.avg_weight - first.avg_weight) * n / 1000.0
             consumed = (g.db.query(func.sum(FeedingTask.confirm_amount))
                         .filter(FeedingTask.pond_id == pond_id,
-                                FeedingTask.created_at >= first.weighed_at)
+                                FeedingTask.created_at >= first.weighed_at,
+                                FeedingTask.created_at < last.weighed_at + timedelta(days=1),
+                                FeedingTask.status.in_(["done", "stopped"]))
                         .scalar()) or 0
             if gain_kg > 0:
                 fcr = round(consumed / gain_kg, 3)
-                fcr_note = (f"口径：饲料消耗 {consumed:.2f}kg / 鱼体增重 {gain_kg:.2f}kg；"
-                            f"称重区间 {first.weighed_at:%Y-%m-%d} ~ {last.weighed_at:%Y-%m-%d}")
+                fcr_note = (f"口径：{first.weighed_at:%Y-%m-%d} ~ {last.weighed_at:%Y-%m-%d}"
+                            f" 称重区间内用料 {consumed:.2f}kg / 鱼体增重 {gain_kg:.2f}kg；"
+                            f"区间之后的投喂不计入本系数")
             else:
                 fcr_note = "有效增重为 0 或负值，暂不能计算"
         else:
@@ -356,7 +386,15 @@ def logs():
         if v:
             q = q.filter(col == v)
     if request.args.get("pond_id"):
-        q = q.filter(AuditLog.pond_id == int(request.args["pond_id"]))
+        pond_id = int(request.args["pond_id"])
+        # 指定鱼塘时校验访问权限，防止越权读取其他塘日志
+        if not can_view(g.db, g.user, pond_id):
+            return fail("无权访问该鱼塘日志", 403)
+        q = q.filter(AuditLog.pond_id == pond_id)
+    else:
+        # 未指定时只返回可见鱼塘（及全局）日志
+        visible = [p.id for p in g.db.query(Pond).all() if can_view(g.db, g.user, p.id)]
+        q = q.filter(or_(AuditLog.pond_id.is_(None), AuditLog.pond_id.in_(visible or [-1])))
     if request.args.get("task_no"):
         t = g.db.query(FeedingTask).filter_by(task_no=request.args["task_no"]).first()
         q = q.filter(AuditLog.task_id == (t.id if t else -1))

@@ -2,6 +2,7 @@
 from datetime import datetime
 
 from flask import Blueprint, g, request
+from sqlalchemy.exc import IntegrityError
 
 from models import FeedingTask, Review, Suggestion
 from services import suggestion as sug_svc
@@ -37,8 +38,18 @@ def create_suggestion(pond_id):
             day = datetime.strptime(body["date"], "%Y-%m-%d").date()
         except ValueError:
             return fail("date 格式应为 YYYY-MM-DD")
-    sg, msg = sug_svc.generate(g.db, pond_id, batch_id=body.get("batch_id"),
-                               day=day, requested_by=g.user.id)
+    # 并发生成时编号可能冲突：回退重新生成再提交
+    last_exc = None
+    for attempt in range(4):
+        try:
+            sg, msg = sug_svc.generate(g.db, pond_id, batch_id=body.get("batch_id"),
+                                       day=day, requested_by=g.user.id)
+            break
+        except IntegrityError as e:
+            last_exc = e
+            g.db.rollback()
+    else:
+        return fail("编号生成冲突，请重试", 503, reason="code_conflict")
     if msg:
         return fail(msg, 200, reason="no_valid_suggestion")
     return ok(sug_svc.serial(sg))
@@ -51,7 +62,29 @@ def get_suggestion(code):
     sg = g.db.query(Suggestion).filter_by(code=code).first()
     if not sg:
         return fail("建议不存在", 404)
+    if not can_view(g.db, g.user, sg.pond_id):
+        return fail("无权访问该建议", 403)
     return ok(sug_svc.serial(sg))
+
+
+@bp.post("/suggestions/<code>/cancel")
+def cancel_suggestion(code):
+    """取消待确认建议：pending -> cancelled。已确认/已失效的不可取消。"""
+    if not g.user:
+        return fail("未提供有效身份", 401)
+    sg = g.db.query(Suggestion).filter_by(code=code).first()
+    if not sg:
+        return fail("建议不存在", 404)
+    if not can_control(g.db, g.user, sg.pond_id):
+        return fail("无权操作该建议", 403)
+    if sg.status != "pending":
+        return fail(f"建议状态为 {sg.status}，只有待确认状态可取消", 409, reason="not_cancellable")
+    sg.status = "cancelled"
+    from services.common import audit
+    audit(g.db, "control", "suggest_cancel", pond_id=sg.pond_id, user_id=g.user.id,
+          detail={"suggestion": sg.code})
+    g.db.commit()
+    return ok(sug_svc.serial(sg), note="已取消的建议不能再下发任务")
 
 
 @bp.get("/ponds/<int:pond_id>/suggestions")
@@ -72,9 +105,19 @@ def create_task(pond_id):
     if err:
         return err
     body = request.get_json(silent=True) or {}
-    task, msg, kind = task_svc.create(g.db, body, g.user)
+    # 并发创建时任务号可能冲突：回退重建再提交
+    last_exc = None
+    for attempt in range(4):
+        try:
+            task, msg, kind = task_svc.create(g.db, body, g.user, expected_pond_id=pond_id)
+            break
+        except IntegrityError as e:
+            last_exc = e
+            g.db.rollback()
+    else:
+        return fail("任务编号冲突，请重试", 503, reason="code_conflict")
     if msg:
-        code = 200 if kind == "duplicate" else 400
+        code = 200 if kind == "duplicate" else (403 if kind == "forbidden" else 400)
         return fail(msg, code, reason=kind)
     # 保存成功后下发
     task, derr = task_svc.dispatch(g.db, task)

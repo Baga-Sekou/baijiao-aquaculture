@@ -210,7 +210,8 @@ def train_growth(db, pond_id):
         return None, "鱼塘不存在"
     batch = _active_batch(db, pond_id)
     weighs = _weight_series(db, pond_id, batch)
-    ref = (batch.stock_date or (weighs[0][0] if weighs else None)) if (batch or weighs) else None
+    ref = (batch.stock_date if batch and batch.stock_date else
+           (weighs[0][0] if weighs else None))
     if not ref or len(weighs) < MIN_GROWTH_SAMPLES:
         return None, (f"数据不足：有效称重记录 {len(weighs)} 条，"
                       f"至少需要 {MIN_GROWTH_SAMPLES} 条（两次称重之间的间隔计 1 条起）")

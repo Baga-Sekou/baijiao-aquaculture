@@ -159,11 +159,17 @@ def _pond_metrics(db, pond_id, since):
     if len(weighs) >= 2 and n_fish:
         first, last = weighs[0], weighs[-1]
         gain_kg = (last.avg_weight - first.avg_weight) * n_fish / 1000.0
-        consumed = feed_sum(first.weighed_at)
+        # 分子与分母覆盖相同时间区间：只取两次称重之间的落定用料（与 feed-stats 一致）
+        consumed = (db.query(func.sum(FeedingTask.confirm_amount))
+                    .filter(FeedingTask.pond_id == pond_id,
+                            FeedingTask.created_at >= first.weighed_at,
+                            FeedingTask.created_at < last.weighed_at + timedelta(days=1),
+                            FeedingTask.status.in_(["done", "stopped"]))
+                    .scalar()) or 0.0
         if gain_kg > 0 and consumed > 0:
             fcr = round(consumed / gain_kg, 3)
-            fcr_basis = (f"饲料 {consumed:.1f}kg / 增重 {gain_kg:.1f}kg"
-                         f"（{first.weighed_at:%m-%d} ~ {last.weighed_at:%m-%d}）")
+            fcr_basis = (f"用料 {consumed:.1f}kg / 增重 {gain_kg:.1f}kg"
+                         f"（{first.weighed_at:%m-%d} ~ {last.weighed_at:%m-%d} 称重区间）")
 
     growth_rate, growth_basis = None, None
     if len(weighs) >= 2:
@@ -186,7 +192,15 @@ def _pond_metrics(db, pond_id, since):
 def leaderboard():
     if not g.user:
         return fail("未提供有效身份", 401)
-    days = int(request.args.get("days", 30))
+    raw = request.args.get("days")
+    days = 30
+    if raw is not None:
+        try:
+            days = int(raw)
+        except ValueError:
+            return fail("days 必须是整数", 400)
+        if not (1 <= days <= 3650):
+            return fail("days 取值范围 1~3650", 400)
     since = now() - timedelta(days=days)
     ranked, insufficient = [], []
     for p in g.db.query(Pond).order_by(Pond.code).all():

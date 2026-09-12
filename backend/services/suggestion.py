@@ -9,8 +9,11 @@
 import json
 from datetime import timedelta
 
+from sqlalchemy.exc import IntegrityError
+
 from models import Batch, FeedingFeedback, FeedingTask, Suggestion
-from services.common import audit, cfg, cfg_float, next_code, now
+from services.common import (audit, cfg, cfg_float, commit_with_code_retry,
+                             next_code, now, weight_series)
 from services import environment as env
 
 RULE_VERSION_FALLBACK = "rule-v1.0-demo"
@@ -18,7 +21,7 @@ RULE_VERSION_FALLBACK = "rule-v1.0-demo"
 # 示例规则参数（演示用途，非养殖阈值；真实口径由业务方确认）
 DEMO_RULE = {
     "label": "演示规则（测试用途，非养殖依据）",
-    "base_ratio": 0.015,        # 参考投喂量 = 鱼体重 × 比例
+    "base_ratio": 0.015,        # 参考投喂量 = 全塘生物量(kg) × 比例
     "temp_optimal": (24.0, 28.0),
     "temp_factor_low": 0.7,     # 低于适温区
     "temp_factor_high": 0.6,    # 高于适温区
@@ -38,11 +41,29 @@ def _feeder_for(db, pond_id):
 
 
 def generate(db, pond_id, batch_id=None, day=None, requested_by=None):
-    """生成一条建议。返回 (suggestion, error_message)。"""
-    from models import Device  # noqa
+    """生成一条建议。返回 (suggestion, error_message)。
+
+    口径：全塘单次投喂量(kg) = 鱼重(g) × 投魂数量 / 1000 × 比例 × 系数；
+    编号唯一冲突（并发）时回退重新生成再提交。
+    """
+    for attempt in range(4):
+        sg, err = _build(db, pond_id, batch_id, day, requested_by)
+        if err:
+            return None, err
+        try:
+            db.commit()
+            return sg, None
+        except IntegrityError:
+            db.rollback()
+            if attempt == 3:
+                raise
+    raise RuntimeError("unreachable")
+
+
+def _build(db, pond_id, batch_id, day, requested_by):
     batch = None
     if batch_id:
-        batch = db.query(Batch).filter_by(id=batch_id).first()
+        batch = db.query(Batch).filter_by(id=batch_id, pond_id=pond_id).first()
     if not batch:
         batch = (db.query(Batch).filter_by(pond_id=pond_id, status="active")
                  .order_by(Batch.id.desc()).first())
@@ -63,7 +84,7 @@ def generate(db, pond_id, batch_id=None, day=None, requested_by=None):
     if not feat["enough"]:
         return None, "数据不足：当日无有效水温样本，无法形成特征"
 
-    # ---- 3) 摄食状态与鱼重 ----
+    # ---- 3) 摄食状态与鱼重（称重绑定当前批次，不跨批次取值）----
     fb = _latest_feedback(db, pond_id)
     fb_state = "unknown"
     if fb:
@@ -74,15 +95,20 @@ def generate(db, pond_id, batch_id=None, day=None, requested_by=None):
         # 反馈过期则按 unknown 处理，不把旧反馈当成当前状态
 
     weight = batch.initial_weight or 50.0
-    from models import WeighRecord
-    latest_w = (db.query(WeighRecord).filter_by(pond_id=pond_id)
-                .order_by(WeighRecord.weighed_at.desc()).first())
-    if latest_w and latest_w.avg_weight:
-        weight = latest_w.avg_weight
+    latest_w = None
+    weighs = weight_series(db, pond_id, batch)
+    if weighs:
+        latest_w = weighs[-1][1]
+    if latest_w:
+        weight = latest_w
+
+    if not batch.fish_number:
+        return None, "批次缺少投魂数量，无法按全塘口径计算建议量"
+    biomass_kg = weight * batch.fish_number / 1000.0
 
     # ---- 4) 规则计算 ----
     temp_for_calc = feat["mean"] if feat["mean"] is not None else temp_m.value
-    base = weight * DEMO_RULE["base_ratio"]
+    base = biomass_kg * DEMO_RULE["base_ratio"]
     lo, hi = DEMO_RULE["temp_optimal"]
     if temp_for_calc < lo:
         temp_factor = DEMO_RULE["temp_factor_low"]
@@ -111,7 +137,8 @@ def generate(db, pond_id, batch_id=None, day=None, requested_by=None):
 
     reason = (
         f"规则 {rule_version}（{DEMO_RULE['label']}）："
-        f"鱼重 {weight:.1f}g × 基础比例 {DEMO_RULE['base_ratio']} = {base:.2f}kg；"
+        f"全塘口径 鱼重 {weight:.1f}g × {batch.fish_number} 尾 / 1000 = 生物量 {biomass_kg:.1f}kg，"
+        f"× 基础比例 {DEMO_RULE['base_ratio']} = {base:.2f}kg；"
         f"{temp_note}，温度系数 {temp_factor}；"
         f"摄食状态 {fb_state}，系数 {fb_factor}；"
         f"温度特征窗口 {feat['window']}，有效样本 {feat['samples_valid']}/{feat['expected_samples']}。"
@@ -131,6 +158,7 @@ def generate(db, pond_id, batch_id=None, day=None, requested_by=None):
             "feedback_state": fb_state,
             "fish_weight_g": weight,
             "fish_number": batch.fish_number,
+            "biomass_kg": round(biomass_kg, 1),
             "batch_code": batch.code,
             "demo_rule": DEMO_RULE["label"],
         }, ensure_ascii=False),
@@ -142,7 +170,6 @@ def generate(db, pond_id, batch_id=None, day=None, requested_by=None):
           user_id=requested_by,
           detail={"suggestion": sg.code, "amount": sg.amount,
                   "rule_version": rule_version, "demo": True})
-    db.commit()
     return sg, None
 
 

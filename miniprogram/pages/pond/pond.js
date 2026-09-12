@@ -19,9 +19,12 @@ Page({
       const cn = { temperature: '水温', oxygen: '溶氧', ph: 'pH' };
       const env = Object.keys(cn).filter((k) => data[k] && data[k].connected)
         .map((k) => ({ name: cn[k], value: data[k].value, unit: data[k].unit,
-                       time: data[k].collected_at }));
+                       time: data[k].collected_at,
+                       expired: data[k].expired }));
       this.setData({ env });
-    }).catch(() => {});
+    }).catch((e) => {
+      wx.showToast({ title: e.message || '环境数据获取失败', icon: 'none' });
+    });
     api.get(`/api/ponds/${id}/tasks`).then(({ data }) => {
       this.setData({ tasks: (data || []).slice(0, 10) });
     }).catch(() => {});

@@ -34,9 +34,11 @@ def device_busy(db, device_id):
             .first())
 
 
-def create(db, payload, user):
+def create(db, payload, user, expected_pond_id=None):
     """创建投喂任务。幂等：相同 request_no 返回原任务。
 
+    expected_pond_id：URL 中的鱼塘。建议所属鱼塘必须与其一致，
+    防止用其他塘的建议编号跨塘越权下发；幂等命中时同样校验。
     返回 (task, error, reason)
     """
     request_no = (payload.get("request_no") or "").strip()
@@ -49,6 +51,8 @@ def create(db, payload, user):
     # ---- 幂等：相同请求编号直接返回原任务 ----
     dup = db.query(FeedingTask).filter_by(request_no=request_no).first()
     if dup:
+        if expected_pond_id is not None and dup.pond_id != expected_pond_id:
+            return None, "该请求编号已属于其他鱼塘的任务", "reject"
         audit(db, "task", "duplicate_request", pond_id=dup.pond_id, task_id=dup.id,
               user_id=getattr(user, "id", None),
               detail={"request_no": request_no, "returned_task": dup.task_no})
@@ -58,12 +62,18 @@ def create(db, payload, user):
     sg = db.query(Suggestion).filter_by(code=suggestion_code).first()
     if not sg:
         return None, f"建议不存在：{suggestion_code}", "reject"
+    if expected_pond_id is not None and sg.pond_id != expected_pond_id:
+        return None, f"建议 {suggestion_code} 不属于该鱼塘", "forbidden"
     if sg.status == "expired" or (sg.valid_until and sg.valid_until < now()):
         sg.status = "expired"
         db.commit()
         return None, "建议已过期，不能直接执行", "reject"
     if sg.status == "confirmed":
         return None, "该建议已被确认，不能重复使用", "reject"
+    if sg.status == "cancelled":
+        return None, "该建议已取消，不能执行", "reject"
+    if sg.status != "pending":
+        return None, f"建议状态 {sg.status} 不可执行", "reject"
 
     pond_id = sg.pond_id
     try:
@@ -140,16 +150,35 @@ def _next_seq(db, task_id):
 
 
 def receive_receipt(db, payload):
-    """接收终端回执。返回 (task, error)。"""
+    """接收终端回执。返回 (task, error)。
+
+    状态机约束：终态（done/stopped/failed）与待核查（unknown）不接受过程回执
+    造成的回退——乱序/迟到回执一律留痕（late/duplicate 标记），不改变状态。
+    """
     task_no = (payload.get("task_no") or "").strip()
     kind = (payload.get("kind") or "").strip()   # accept/execute/finish/stop
     status = (payload.get("status") or "").strip()
     if not task_no or not kind:
         return None, "缺少 task_no 或 kind"
+    if kind not in ("accept", "execute", "finish", "stop"):
+        return None, f"回执类型 kind 不合法：{kind}"
+    valid_status = {"accept": ("accepted",), "execute": ("running",),
+                    "finish": ("done", "failed", "stopped"),
+                    "stop": ("stopped",)}
+    if status not in valid_status.get(kind, ()):
+        return None, f"{kind} 回执的 status 必须是 {'/'.join(valid_status[kind])}"
 
     task = db.query(FeedingTask).filter_by(task_no=task_no).first()
     if not task:
         return None, f"任务不存在：{task_no}"
+
+    actual = payload.get("actual_amount")
+    try:
+        actual = float(actual) if actual not in (None, "") else None
+    except (TypeError, ValueError):
+        return None, "actual_amount 必须是数值"
+    if actual is not None and (actual < 0 or actual != actual or actual == float("inf")):
+        return None, "actual_amount 不能为负数或非有限数值"
 
     # ---- 重复回执：同一 kind 已存在则不重复累计 ----
     dup = (db.query(Receipt)
@@ -161,12 +190,6 @@ def receive_receipt(db, payload):
                 .order_by(Review.id.desc()).first())
     is_late = reviewed is not None and task.status in ("done", "stopped", "failed", "unknown") \
         and reviewed.conclusion in ("done", "stopped", "failed", "not_executed")
-
-    actual = payload.get("actual_amount")
-    try:
-        actual = float(actual) if actual not in (None, "") else None
-    except (TypeError, ValueError):
-        actual = None
 
     r = Receipt(
         task_id=task.id, kind=kind, status=status,
@@ -185,11 +208,33 @@ def receive_receipt(db, payload):
         db.commit()
         return task, None
 
-    # ---- 状态推进 ----
+    # 迟到回执与已定核查结论冲突 -> 标记待再次核对（在状态守卫之前，保证留痕）
+    if is_late and reviewed:
+        mapped = {"finish": {"done": "done", "failed": "failed", "stopped": "stopped"},
+                  "stop": {"stopped": "stopped"}}.get(kind, {}).get(status)
+        if mapped and mapped != reviewed.conclusion:
+            reviewed.conflict = True
+            _raise_conflict_alert(db, task, reviewed, mapped)
+
+    # ---- 状态推进（显式允许的转换，乱序回执不回退状态）----
+    allowed = {
+        "accept": ("dispatched",),
+        "execute": ("dispatched", "running"),
+        "finish": ("dispatched", "running"),
+        "stop": ("dispatched", "running"),
+    }
+    if task.status not in allowed[kind]:
+        # 终态/待核查后的迟到过程回执：留痕，不改变状态、不覆盖实测量
+        audit(db, "task", "receipt_ignored_out_of_order", pond_id=task.pond_id,
+              task_id=task.id,
+              detail={"kind": kind, "status": status,
+                      "current": task.status, "late": is_late})
+        db.commit()
+        return task, None
+
     if kind == "accept":
-        if task.status == "dispatched":
-            task.status = "running"
-            task.started_at = now()
+        task.status = "running"
+        task.started_at = now()
     elif kind == "execute":
         task.status = "running"
     elif kind == "finish":
@@ -215,14 +260,6 @@ def receive_receipt(db, payload):
             task.actual_amount = actual
             task.actual_source = "measured"
         task.device_locked = False
-
-    # 迟到回执与已定核查结论冲突 -> 标记待再次核对
-    if is_late and reviewed:
-        mapped = {"finish": {"done": "done", "failed": "failed", "stopped": "stopped"},
-                  "stop": {"stopped": "stopped"}}.get(kind, {}).get(status)
-        if mapped and mapped != reviewed.conclusion:
-            reviewed.conflict = True
-            _raise_conflict_alert(db, task, reviewed, mapped)
 
     audit(db, "task", f"receipt_{kind}", pond_id=task.pond_id, task_id=task.id,
           detail={"status": status, "actual": actual, "late": is_late})
@@ -254,27 +291,37 @@ def _raise_conflict_alert(db, task, review, mapped):
 
 
 def check_timeouts(db, timeout_sec=None):
-    """回执超时 -> 标记结果未知（待核查），保留设备占用，不自动重发。"""
+    """回执超时 -> 标记结果未知（待核查），保留设备占用，不自动重发。
+
+    覆盖两个等待阶段：dispatched（等待接收/开始）以 dispatched_at 计，
+    running（等待执行完成）以 started_at（缺省 dispatched_at）计——
+    设备接收任务后失联同样要进入待核查闭环。
+    """
     # 注意：timeout_sec=0 是合法值（立即判超时），不能用 `or` 兜底
     t = cfg_float(db, "task_timeout_sec", 120) if timeout_sec is None else timeout_sec
     # 留 1 秒余量：任务刚下发 (<1s) 时不应被判定为超时
     deadline = now() - timedelta(seconds=t + 1)
     rows = (db.query(FeedingTask)
-            .filter(FeedingTask.status == "dispatched",
-                    FeedingTask.dispatched_at < deadline,
+            .filter(FeedingTask.status.in_(["dispatched", "running"]),
                     FeedingTask.device_locked.is_(True)).all())
+    timed_out = []
     for task in rows:
+        anchor = task.started_at or task.dispatched_at
+        if anchor is None or anchor >= deadline:
+            continue
         task.status = "unknown"
         audit(db, "task", "receipt_timeout", pond_id=task.pond_id, task_id=task.id,
-              detail={"task_no": task.task_no, "timeout_sec": t})
+              detail={"task_no": task.task_no, "timeout_sec": t,
+                      "from_status": "dispatched/running"})
         db.add(Alert(code=_alert_code(db),
                      pond_id=task.pond_id, device_id=task.device_id, task_id=task.id,
                      kind="receipt_timeout", level="error",
                      message=f"任务 {task.task_no} 回执超时，结果待核实，已暂停追加",
                      status="open"))
-    if rows:
+        timed_out.append(task)
+    if timed_out:
         db.commit()
-    return len(rows)
+    return len(timed_out)
 
 
 def review(db, task_no, user, conclusion, basis=None, evidence=None, device_recovery=None):

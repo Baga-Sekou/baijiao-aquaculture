@@ -69,7 +69,10 @@ def get_pond(pond_id):
 
 @bp.post("/ponds/<int:pond_id>/batches")
 def create_batch(pond_id):
-    """新建批次（重新投苗时另建批次，避免跨批次接生长曲线）。"""
+    """新建批次（重新投苗时另建批次，避免跨批次接生长曲线）。
+
+    同塘新建活动批次会自动把旧活动批次置为 closed（批次切换规则）。
+    """
     err = _need_user()
     if err:
         return err
@@ -81,6 +84,14 @@ def create_batch(pond_id):
     body = request.get_json(silent=True) or {}
     if not body.get("code"):
         return fail("缺少批次编号 code")
+    from services.common import parse_dt
+    stock_date = parse_dt(body.get("stock_date"))
+    if body.get("stock_date") and stock_date is None:
+        return fail("stock_date 格式不正确（应为 YYYY-MM-DD）")
+    plan_harvest = parse_dt(body.get("plan_harvest_date"))
+    # 批次切换：旧活动批次关闭，避免两条活动批次并存
+    for old in g.db.query(Batch).filter_by(pond_id=pond_id, status="active").all():
+        old.status = "closed"
     b = Batch(pond_id=pond_id, code=body["code"],
               species=body.get("species", "海鲈"),
               fry_source=body.get("fry_source"),
@@ -88,13 +99,15 @@ def create_batch(pond_id):
               initial_weight=body.get("initial_weight"),
               target_weight=body.get("target_weight"),
               weigh_cycle_days=body.get("weigh_cycle_days"),
+              stock_date=stock_date,
+              plan_harvest_date=plan_harvest,
               src_note=body.get("src_note", "手工登记"))
     g.db.add(b)
     audit(g.db, "config", "create_batch", pond_id=pond_id, user_id=g.user.id,
-          detail={"batch": b.code})
+          detail={"batch": b.code, "stock_date": body.get("stock_date")})
     g.db.commit()
     return ok(row(b, ["id", "code", "species", "fish_number", "initial_weight",
-                      "target_weight", "status"]))
+                      "target_weight", "stock_date", "plan_harvest_date", "status"]))
 
 
 @bp.get("/grants")

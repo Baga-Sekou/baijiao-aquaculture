@@ -5,7 +5,13 @@ const API = {
     const user = localStorage.getItem('bj_user') || 'owner';
     const opt = { method, headers: { 'X-User': user, 'Content-Type': 'application/json' } };
     if (body !== undefined) opt.body = JSON.stringify(body);
-    const r = await fetch(path, opt);
+    let r;
+    try {
+      r = await fetch(path, opt);
+    } catch (e) {
+      // 断网/后端未启动：返回统一错误结构，调用方据此恢复按钮状态
+      return { status: 0, ok: false, message: '网络异常：无法连接后端，请检查网络后重试' };
+    }
     let data = {};
     try { data = await r.json(); } catch (e) { data = { ok: false, message: '响应解析失败' }; }
     return { status: r.status, ...data };
@@ -195,5 +201,13 @@ function statusCN(s) {
 }
 
 function fmtTime(s) { return s ? s.slice(5, 16) : '—'; }
+
+/* 本地日期 YYYY-MM-DD（不用 toISOString，避免时区把凌晨算成昨天） */
+function localToday() {
+  const d = new Date();
+  return d.getFullYear() + '-' +
+    String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0');
+}
 
 document.addEventListener('DOMContentLoaded', initUserSelect);
