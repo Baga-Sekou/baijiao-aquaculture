@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}待核查 · 白蕉水产养殖管理平台{% endblock %}
+{% block content %}
+<h1>投喂任务核查</h1>
+<p class="muted">执行结果不明的任务进入待核查；核实前不自动重新下发投料。核查需具备核查权限。</p>
+<div class="row" style="margin-bottom:12px">
+  <select class="input" id="filter" style="width:auto">
+    <option value="unknown">结果未知（待核查）</option>
+    <option value="failed">失败</option>
+    <option value="all">全部</option>
+  </select>
+  <button class="btn gray" id="btnTimeout">触发超时巡检</button>
+  <span class="muted">超时巡检：把已下发但超时未回执的任务标记为结果未知。</span>
+</div>
+<div class="card"><div id="list"></div></div>
+{% endblock %}
+{% block script %}
+<script>
+async function load() {
+  const st = $('#filter').value;
+  const r = await API.get('/api/tasks?status=' + st);
+  if (!r.ok) { $('#list').innerHTML = `<div class="empty">${esc(r.message)}</div>`; return; }
+  if (!r.data.length) { $('#list').innerHTML = '<div class="empty">无待核查任务</div>'; return; }
+  $('#list').innerHTML = `<table><thead><tr>
+    <th>任务号</th><th>状态</th><th>建议/确认/实际</th><th>设备占用</th><th>回执</th><th>操作</th>
+    </tr></thead><tbody>${r.data.map(t => `
+    <tr>
+      <td>${esc(t.task_no)}<div class="muted">${esc(t.request_no)}</div></td>
+      <td><span class="pill ${t.status === 'unknown' ? 'bad' : 'warn'}">${statusCN(t.status)}</span></td>
+      <td>${t.suggested_amount ?? '—'} / ${t.confirm_amount ?? '—'} /
+          ${t.actual_amount == null ? '未获取' : t.actual_amount} ${esc(t.unit)}</td>
+      <td>${t.device_locked ? '<span class="pill bad">占用中</span>' : '<span class="pill ok">已释放</span>'}</td>
+      <td class="muted">${(t.receipts || []).map(x => esc(x.kind) + (x.late ? '·迟到' : '')).join('、') || '无'}</td>
+      <td>${t.device_locked ? `<button class="btn sm" onclick="openReview('${esc(t.task_no)}')">核查</button>` : '<span class="muted">已结束</span>'}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+async function openReview(tn) {
+  const basis = prompt(`核查任务 ${tn}\n请填写核查依据（如：查询终端执行记录 / 现场查看）：`, '查询终端执行记录，结合现场查看');
+  if (basis === null) return;
+  const c = prompt('结论（done=已完成 / stopped=已停止 / failed=失败 / not_executed=未执行 / unknown=仍不明）：', 'not_executed');
+  if (!c) return;
+  const rec = (c === 'unknown') ? null :
+    prompt('设备恢复依据（填写后解除设备占用）：', '终端已无该任务，旧指令不再执行，设备可用');
+  const r = await API.post(`/api/tasks/${tn}/review`, {
+    conclusion: c, basis, evidence: '现场取证', device_recovery: rec,
+  });
+  if (!r.ok) { toast(r.message, 'err'); return; }
+  toast(`核查完成：${statusCN(r.data.status)}，设备占用${r.data.device_locked ? '未释放（仍不明）' : '已解除'}`, 'ok');
+  load();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  load();
+  $('#filter').onchange = load;
+  $('#btnTimeout').onclick = async () => {
+    const r = await API.post('/api/tasks/check-timeouts');
+    if (!r.ok) { toast(r.message, 'err'); return; }
+    toast(`超时巡检完成，${r.data.timed_out} 个任务转入待核查`, 'ok');
+    load();
+  };
+});
+</script>
+{% endblock %}

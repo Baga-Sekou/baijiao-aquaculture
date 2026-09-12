@@ -1,0 +1,284 @@
+{% extends "base.html" %}
+{% block title %}单塘看板 · 白蕉水产养殖管理平台{% endblock %}
+{% block content %}
+<div class="row">
+  <h1 id="pondName">单塘看板</h1>
+  <span class="spacer"></span>
+  <span id="batchPill" class="pill"></span>
+</div>
+
+<!-- 环境指标 -->
+<div id="envCards" class="grid c4"></div>
+
+<!-- 投喂：建议 → 人工确认 -->
+<div class="card span2" style="margin-top:14px">
+  <h2>投喂建议与确认</h2>
+  <div class="row" style="margin-bottom:10px">
+    <button class="btn" id="btnSuggest">生成投喂建议</button>
+    <span class="muted" id="suggestHint">系统提供建议，需人工确认后执行；建议量、确认量、实际量分别保存。</span>
+  </div>
+  <div id="suggestBox"></div>
+</div>
+
+<!-- 趋势图 -->
+<div class="grid c2" style="margin-top:14px">
+  <div class="card">
+    <h2>水温趋势</h2><div id="chartTemp"></div>
+  </div>
+  <div class="card">
+    <h2>溶氧趋势</h2><div id="chartOxy"></div>
+  </div>
+</div>
+
+<!-- 监控画面 -->
+<div class="card" style="margin-top:14px">
+  <h2>塘口监控</h2>
+  <div class="grid c2" id="cams"></div>
+  <p class="muted" style="margin-top:8px">相机离线时明确提示“画面不可用”，不以旧截图表示正常监控。</p>
+</div>
+
+<!-- 投喂记录 -->
+<div class="card" style="margin-top:14px">
+  <h2>投喂任务记录</h2>
+  <div id="taskTable"></div>
+</div>
+
+<!-- 疑似死鱼事件 -->
+<div class="card" style="margin-top:14px">
+  <h2>疑似死鱼事件</h2>
+  <div class="row" style="margin-bottom:8px">
+    <button class="btn ghost" id="btnDetect">调用识别接口（仿真）</button>
+    <button class="btn gray" id="btnReport">登记疑似事件</button>
+    <span class="muted">识别结果作为待确认事件；人工确认前不计入已确认数量。</span>
+  </div>
+  <div id="eventTable"></div>
+</div>
+
+<!-- 待处理异常 -->
+<div class="card" style="margin-top:14px">
+  <h2>待处理异常</h2>
+  <div id="alertTable"></div>
+</div>
+{% endblock %}
+{% block script %}
+<script>
+const POND = {{ pond_id }};
+let SUGGESTION = null;
+
+function metricCard(label, m, unitDefault) {
+  if (!m || !m.connected) {
+    return `<div class="card metric"><div class="k">${label}</div>
+      <div class="v">未接入</div><div class="s">暂无该指标设备</div></div>`;
+  }
+  const cls = m.expired ? 'warn' : '';
+  return `<div class="card metric ${cls}">
+    <div class="k">${label}</div>
+    <div class="v">${m.value}${esc(m.unit || unitDefault || '')}</div>
+    <div class="s">${m.expired ? '<span class="pill warn">已过期</span> ' : ''}${fmtTime(m.collected_at)} · 来源 ${esc(m.source)}</div>
+  </div>`;
+}
+
+async function loadPond() {
+  const r = await API.get(`/api/ponds/${POND}`);
+  if (!r.ok) { $('#pondName').textContent = r.message || '无权访问'; return; }
+  $('#pondName').textContent = r.data.name;
+  const b = r.data.batches.find(x => x.status === 'active');
+  $('#batchPill').textContent = b ? `批次 ${b.code} · ${b.species} · ${b.fish_number || '—'} 尾` : '无活动批次';
+}
+
+async function loadEnv() {
+  const r = await API.get(`/api/ponds/${POND}/env/latest`);
+  if (!r.ok) return;
+  const e = r.data;
+  $('#envCards').innerHTML =
+    metricCard('水温', e.temperature, '℃') + metricCard('溶氧', e.oxygen, ' mg/L') +
+    metricCard('pH', e.ph, '') + metricCard('ORP', e.orp, ' mV');
+}
+
+async function loadCharts() {
+  const r = await API.get(`/api/ponds/${POND}/charts?days=30`);
+  if (!r.ok) return;
+  const d = r.data;
+  const toPts = (arr, unit) => arr.map(x => ({
+    v: x.v, valid: x.valid, label: x.t + ' ' + x.v + unit
+  }));
+  lineChart($('#chartTemp'), [{ name: '水温', color: '#C55A11', unit: '℃', points: toPts(d.temperature, '℃') }]);
+  lineChart($('#chartOxy'), [{ name: '溶氧', color: '#2E75B6', unit: 'mg/L', points: toPts(d.oxygen, ' mg/L') }]);
+}
+
+async function loadCams() {
+  const r = await API.get(`/api/ponds/${POND}/cameras`);
+  if (!r.ok) return;
+  if (!r.data.length) { $('#cams').innerHTML = '<div class="empty">该鱼塘未接入相机</div>'; return; }
+  $('#cams').innerHTML = r.data.map(c => `
+    <div>
+      <div class="cam ${c.online ? '' : 'off'}">
+        ${c.online ? `${esc(c.position)}画面` : '画面不可用'}
+      </div>
+      <p class="muted" style="margin:6px 0 0">
+        ${esc(c.position)}相机 · ${c.online ? '在线' : '<span class="pill bad">离线</span>'}
+        ${c.online ? fmtTime(c.last_frame_at) : '— 不以旧截图表示正常'}
+      </p>
+    </div>`).join('');
+}
+
+async function loadTasks() {
+  const r = await API.get(`/api/ponds/${POND}/tasks`);
+  if (!r.ok) { $('#taskTable').innerHTML = `<div class="empty">${esc(r.message)}</div>`; return; }
+  if (!r.data.length) { $('#taskTable').innerHTML = '<div class="empty">暂无投喂任务</div>'; return; }
+  $('#taskTable').innerHTML = `<table><thead><tr>
+    <th>任务号</th><th>状态</th><th>建议量</th><th>确认量</th><th>实际量</th><th>时间</th><th></th>
+    </tr></thead><tbody>${r.data.map(t => `
+    <tr>
+      <td>${esc(t.task_no)}</td>
+      <td><span class="pill ${t.status === 'done' ? 'ok' : (t.status === 'failed' || t.status === 'unknown' ? 'bad' : '')}">${statusCN(t.status)}</span></td>
+      <td>${t.suggested_amount ?? '—'}${esc(t.unit)}</td>
+      <td>${t.confirm_amount ?? '—'}${esc(t.unit)}</td>
+      <td>${t.actual_amount == null ? '<span class="pill warn">未获取</span>' : t.actual_amount + esc(t.unit)}
+          <span class="muted">${esc(t.actual_source || '')}</span></td>
+      <td class="muted">${fmtTime(t.approved_at || t.dispatched_at)}</td>
+      <td><button class="btn sm ghost" onclick="showTask('${esc(t.task_no)}')">详情</button></td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+async function showTask(tn) {
+  const r = await API.get(`/api/tasks/${tn}`);
+  if (!r.ok) { toast(r.message, 'err'); return; }
+  const t = r.data;
+  const box = $('#suggestBox');
+  box.innerHTML = `<div class="reason">
+    <b>任务 ${esc(t.task_no)}</b> · ${statusCN(t.status)}<br>
+    建议量 ${t.suggested_amount ?? '—'} / 确认量 ${t.confirm_amount ?? '—'} / 实际量
+    ${t.actual_amount == null ? '未获取' : t.actual_amount} ${esc(t.unit)}
+    ${t.change_reason ? `<br>修改原因：${esc(t.change_reason)}` : ''}
+    <br>回执 ${t.receipts.length} 条：
+    ${t.receipts.map(x => `${esc(x.kind)}(${esc(x.status)})${x.late ? '[迟到]' : ''}${x.duplicate ? '[重复]' : ''}`).join('、') || '无'}
+    ${t.reviews.length ? `<br>核查：${t.reviews.map(v => esc(v.conclusion) + (v.conflict ? '（与回执冲突）' : '')).join('、')}` : ''}
+  </div>`;
+}
+
+function renderSuggestion(sg) {
+  SUGGESTION = sg;
+  $('#suggestBox').innerHTML = `
+    <div class="reason">
+      <b>建议 ${esc(sg.code)}</b>：<b style="font-size:16px">${sg.amount} ${esc(sg.unit)}</b>
+      <span class="pill">规则 ${esc(sg.rule_version)}</span>
+      <span class="pill warn">演示规则</span><br>
+      有效至 ${esc(sg.valid_until)}<br>
+      <span class="muted">${esc(sg.reason)}</span>
+    </div>
+    <div class="inline" style="margin-top:10px">
+      <div><label class="fld">确认量（${esc(sg.unit)}）</label>
+        <input class="input" id="confirmAmt" type="number" step="0.1" value="${sg.amount}"></div>
+      <div><label class="fld">修改原因（改量时必填）</label>
+        <input class="input" id="changeReason" placeholder="例如：现场观察抢食较弱"></div>
+      <div style="flex:0">
+        <button class="btn green" id="btnConfirm">确认并下发</button>
+        <button class="btn gray" id="btnCancel">取消建议</button>
+      </div>
+    </div>`;
+  $('#btnConfirm').onclick = confirmSuggest;
+  $('#btnCancel').onclick = async () => {
+    await API.get(`/api/suggestions/${sg.code}`);
+    toast('已取消本次建议（不创建投喂任务）', 'ok');
+    $('#suggestBox').innerHTML = '';
+  };
+}
+
+async function suggest() {
+  const btn = $('#btnSuggest'); btn.disabled = true; btn.textContent = '生成中…';
+  const r = await API.post(`/api/ponds/${POND}/suggestions`, {});
+  btn.disabled = false; btn.textContent = '生成投喂建议';
+  if (!r.ok) {
+    $('#suggestBox').innerHTML = `<div class="reason" style="border-color:#e04b4b">
+      <b>未生成有效建议</b><br>${esc(r.message)}</div>`;
+    return;
+  }
+  renderSuggestion(r.data);
+}
+
+async function confirmSuggest() {
+  if (!SUGGESTION) return;
+  const amt = parseFloat($('#confirmAmt').value);
+  const reason = $('#changeReason').value.trim();
+  const reqNo = 'REQ-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+  const r = await API.post(`/api/ponds/${POND}/tasks`, {
+    request_no: reqNo, suggestion_code: SUGGESTION.code,
+    confirm_amount: amt, change_reason: reason || null,
+  });
+  if (!r.ok) { toast(r.message, 'err'); return; }
+  toast(`任务 ${r.data.task_no} 已创建并下发（状态 ${statusCN(r.data.status)}）`, 'ok');
+  SUGGESTION = null; $('#suggestBox').innerHTML = '';
+  setTimeout(() => { loadTasks(); loadPond(); }, 1200);
+}
+
+async function loadEvents() {
+  const r = await API.get(`/api/ponds/${POND}/fish-events`);
+  if (!r.ok) return;
+  if (!r.data.length) { $('#eventTable').innerHTML = '<div class="empty">暂无事件</div>'; return; }
+  $('#eventTable').innerHTML = `<table><thead><tr>
+    <th>编号</th><th>状态</th><th>来源</th><th>置信度</th><th>位置</th><th>发现时间</th><th></th>
+    </tr></thead><tbody>${r.data.map(e => `
+    <tr>
+      <td>${esc(e.code)}</td>
+      <td><span class="pill ${e.status === 'handled' ? 'ok' : (e.status === 'false_alarm' ? '' : 'warn')}">${statusCN(e.status)}</span></td>
+      <td>${e.source === 'vision' ? '识别' : '人工'}</td>
+      <td>${e.confidence != null ? e.confidence : '—'}</td>
+      <td>${esc(e.position_desc || '—')}</td>
+      <td class="muted">${fmtTime(e.detected_at)}</td>
+      <td>${e.status === 'pending'
+        ? `<button class="btn sm" onclick="evAct('${esc(e.code)}','confirm')">确认</button>
+           <button class="btn sm gray" onclick="evAct('${esc(e.code)}','false_alarm')">误报</button>`
+        : `<button class="btn sm gray" onclick="evAct('${esc(e.code)}','process')">标记已处理</button>`}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+async function evAct(code, action) {
+  const r = await API.post(`/api/fish-events/${code}/handle`, { action });
+  if (!r.ok) { toast(r.message, 'err'); return; }
+  toast('已更新事件状态', 'ok'); loadEvents();
+}
+
+async function loadAlerts() {
+  const r = await API.get('/api/alerts');
+  if (!r.ok) return;
+  const list = (r.data || []).filter(a => a.pond_id === POND || a.pond_id == null);
+  if (!list.length) { $('#alertTable').innerHTML = '<div class="empty">无待处理异常</div>'; return; }
+  $('#alertTable').innerHTML = `<table><thead><tr>
+    <th>类型</th><th>级别</th><th>说明</th><th>持续</th><th>时间</th><th></th>
+    </tr></thead><tbody>${list.map(a => `
+    <tr>
+      <td>${esc(a.kind)}</td>
+      <td><span class="pill ${a.level === 'error' ? 'bad' : 'warn'}">${esc(a.level)}</span></td>
+      <td>${esc(a.message)}</td>
+      <td>${a.is_ongoing ? `持续 ×${a.occurrence_count}` : '单次'}</td>
+      <td class="muted">${fmtTime(a.created_at)}</td>
+      <td><button class="btn sm gray" onclick="closeAlert(${a.id})">处理</button></td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+async function closeAlert(id) {
+  const r = await API.post(`/api/alerts/${id}/handle`, { status: 'closed', resolution: '已核查处理' });
+  if (!r.ok) { toast(r.message, 'err'); return; }
+  toast('已处理', 'ok'); loadAlerts();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadPond(); loadEnv(); loadCharts(); loadCams(); loadTasks(); loadEvents(); loadAlerts();
+  $('#btnSuggest').onclick = suggest;
+  $('#btnDetect').onclick = async () => {
+    const r = await API.post(`/api/ponds/${POND}/vision/detect`, { detected: true, confidence: 0.86 });
+    if (!r.ok) { toast(r.message, 'err'); return; }
+    toast(r.data.detected ? '识别到疑似对象，已生成待确认事件' : '未检测到疑似对象', 'ok');
+    loadEvents();
+  };
+  $('#btnReport').onclick = async () => {
+    const r = await API.post(`/api/ponds/${POND}/fish-events`, {
+      position_desc: '水面西南角', observation: '巡塘时发现 2 尾疑似死鱼', source: 'manual',
+    });
+    if (!r.ok) { toast(r.message, 'err'); return; }
+    toast('已登记疑似事件 ' + r.data.code, 'ok'); loadEvents();
+  };
+});
+</script>
+{% endblock %}

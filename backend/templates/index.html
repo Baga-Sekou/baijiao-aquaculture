@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}鱼塘总览 · 白蕉水产养殖管理平台{% endblock %}
+{% block content %}
+<h1>鱼塘总览</h1>
+<div id="ponds" class="grid c3"></div>
+<div class="card" style="margin-top:14px">
+  <h2>运行概览</h2>
+  <div id="overview" class="grid c4"></div>
+  <p class="muted" style="margin-top:8px">
+    在线用户与终端连接数分别统计；未接入的指标显示“未接入”，不填示例值。
+  </p>
+</div>
+{% endblock %}
+{% block script %}
+<script>
+async function load() {
+  const r = await API.get('/api/ponds');
+  const box = $('#ponds');
+  if (!r.ok) { box.innerHTML = `<div class="empty">${esc(r.message || '加载失败')}</div>`; return; }
+  if (!r.data.length) { box.innerHTML = '<div class="empty">当前用户没有可访问的鱼塘</div>'; return; }
+
+  const cards = [];
+  for (const p of r.data) {
+    const d = await API.get(`/api/ponds/${p.id}/dashboard`);
+    const env = (d.ok && d.data.env) || {};
+    const t = env.temperature || {};
+    const o = env.oxygen || {};
+    const alerts = (d.ok && d.data.pending_alerts) || [];
+    const today = (d.ok && d.data.today) || {};
+    const tempBad = t.connected && t.expired;
+    cards.push(`
+      <div class="card">
+        <div class="row">
+          <h2 style="margin:0">${esc(p.name)}</h2>
+          <span class="spacer"></span>
+          <span class="pill ${p.terminal && p.terminal.status === 'online' ? 'ok' : 'bad'}">
+            终端${p.terminal ? statusCN(p.terminal.status) : '未注册'}</span>
+        </div>
+        <p class="muted">编号 ${esc(p.code)} · 规模 ${p.area || '—'}${esc(p.area_unit || '')} ·
+           批次 ${p.active_batch ? esc(p.active_batch.code) : '—'}</p>
+        <div class="grid c2" style="margin:8px 0">
+          <div class="metric ${tempBad ? 'warn' : ''}">
+            <div class="k">水温</div>
+            <div class="v">${t.connected ? t.value + '℃' : '未接入'}</div>
+            <div class="s">${t.connected ? (t.expired ? '已过期 ' : '') + fmtTime(t.collected_at) : '—'}</div>
+          </div>
+          <div class="metric">
+            <div class="k">溶氧</div>
+            <div class="v">${o.connected ? o.value + ' mg/L' : '未接入'}</div>
+            <div class="s">${o.connected ? fmtTime(o.collected_at) : '—'}</div>
+          </div>
+        </div>
+        <p class="muted">今日任务 ${today.tasks || 0} 次 · 已确认投喂 ${today.confirmed_feed_kg || 0} kg</p>
+        ${alerts.length ? `<p><span class="pill bad">待处理异常 ${alerts.length}</span></p>` : '<p><span class="pill ok">无待处理异常</span></p>'}
+        <a class="btn" href="/pond/${p.id}">进入单塘看板</a>
+      </div>`);
+  }
+  box.innerHTML = cards.join('');
+
+  const o = await API.get('/api/ponds/1/dashboard');
+  if (o.ok) {
+    $('#overview').innerHTML = `
+      <div class="metric"><div class="k">在线用户</div><div class="v">${o.data.online_users.users}</div>
+        <div class="s">近 ${o.data.online_users.window_min} 分钟内有操作</div></div>
+      <div class="metric"><div class="k">在线终端</div><div class="v">${o.data.online_users.terminals_online}</div>
+        <div class="s">按连接状态计数</div></div>
+      <div class="metric"><div class="k">导入数据</div><div class="v">2 年</div>
+        <div class="s">2024–2025 课堂 CSV</div></div>
+      <div class="metric"><div class="k">演示数据</div><div class="v">已标识</div>
+        <div class="s">来源：人工/仿真/实测分列</div></div>`;
+  }
+}
+document.addEventListener('DOMContentLoaded', load);
+</script>
+{% endblock %}

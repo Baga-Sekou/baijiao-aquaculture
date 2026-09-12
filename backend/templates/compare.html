@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}多塘比较 · 白蕉水产养殖管理平台{% endblock %}
+{% block content %}
+<h1>多塘比较</h1>
+<div class="row" style="margin-bottom:12px">
+  <label class="fld" style="margin:0">统计区间</label>
+  <select class="input" id="days" style="width:auto">
+    <option value="7">近 7 天</option>
+    <option value="30" selected>近 30 天</option>
+    <option value="365">近 1 年</option>
+  </select>
+  <span class="muted">同一时间范围对照水质、告警频率、用药频率与饲料用量；数据条件不同的鱼塘不直接判定优劣。</span>
+</div>
+<div class="card"><div id="table"></div></div>
+<div class="card" style="margin-top:14px">
+  <h2>饲料统计与饲料系数（A01）</h2>
+  <div id="feedStats"></div>
+</div>
+{% endblock %}
+{% block script %}
+<script>
+async function load() {
+  const days = $('#days').value;
+  const r = await API.get('/api/compare?days=' + days);
+  if (!r.ok) { $('#table').innerHTML = `<div class="empty">${esc(r.message)}</div>`; return; }
+  if (!r.data.length) { $('#table').innerHTML = '<div class="empty">无可比较的鱼塘</div>'; return; }
+  $('#table').innerHTML = `<table><thead><tr>
+    <th>鱼塘</th><th>批次</th><th>规模</th><th>平均水温</th><th>平均溶氧</th>
+    <th>投喂量(kg)</th><th>告警</th><th>用药次数</th><th>养殖阶段</th>
+    </tr></thead><tbody>${r.data.map(x => `
+    <tr>
+      <td><a href="/pond/${x.pond.id}">${esc(x.pond.name)}</a></td>
+      <td>${esc(x.batch_code || '—')}</td>
+      <td>${x.area || '—'}${esc(x.area_unit || '')}</td>
+      <td>${x.avg_temperature != null ? x.avg_temperature + '℃' : '<span class="muted">无数据</span>'}</td>
+      <td>${x.avg_oxygen != null ? x.avg_oxygen + ' mg/L' : '<span class="muted">无数据</span>'}</td>
+      <td>${x.feed_kg}</td>
+      <td>${x.alerts ? `<span class="pill warn">${x.alerts}</span>` : 0}</td>
+      <td>${x.medicine_count}</td>
+      <td class="muted">${x.stage_weight_g ? '均重 ' + x.stage_weight_g + 'g' : '—'}</td>
+    </tr>`).join('')}</tbody></table>
+    <p class="muted" style="margin-top:8px">${esc(r.data[0].sample_note)}</p>`;
+
+  const f = await API.get('/api/ponds/1/feed-stats?days=' + days);
+  if (f.ok) {
+    const d = f.data;
+    $('#feedStats').innerHTML = `
+      <div class="grid c3">
+        <div class="metric"><div class="k">今日投喂</div><div class="v">${d.feed_today_kg}</div><div class="s">kg（按确认量累计）</div></div>
+        <div class="metric"><div class="k">区间投喂</div><div class="v">${d.feed_window_kg}</div><div class="s">kg / ${d.window_days} 天</div></div>
+        <div class="metric ${d.fcr == null ? '' : 'ok'}"><div class="k">饲料系数</div>
+          <div class="v">${d.fcr == null ? '暂不能计算' : d.fcr}</div>
+          <div class="s">${esc(d.fcr_note || '')}</div></div>
+      </div>
+      <p class="muted" style="margin-top:8px">${esc(d.saving_note)}</p>`;
+  }
+}
+document.addEventListener('DOMContentLoaded', () => { load(); $('#days').onchange = load; });
+</script>
+{% endblock %}

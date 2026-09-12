@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}异常与日志 · 白蕉水产养殖管理平台{% endblock %}
+{% block content %}
+<h1>异常与日志</h1>
+
+<div class="card">
+  <div class="row">
+    <h2 style="margin:0">异常告警</h2>
+    <span class="spacer"></span>
+    <select class="input" id="astatus" style="width:auto">
+      <option value="open">未处理</option>
+      <option value="all">全部</option>
+    </select>
+  </div>
+  <div id="alerts" style="margin-top:10px"></div>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <div class="row">
+    <h2 style="margin:0">审计日志</h2>
+    <span class="spacer"></span>
+    <select class="input" id="lcat" style="width:auto">
+      <option value="">全部分类</option>
+      <option value="validate">数据校验</option>
+      <option value="task">任务</option>
+      <option value="control">控制操作</option>
+      <option value="config">配置变更</option>
+    </select>
+  </div>
+  <p class="muted">日志用于定位问题，不记录明文密码等认证信息。</p>
+  <div id="logs"></div>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <h2>系统配置</h2>
+  <p class="muted">采样周期、数据有效期限、设备量程、任务超时与规则版本统一配置；修改保留生效时间与操作者。</p>
+  <div id="config"></div>
+</div>
+{% endblock %}
+{% block script %}
+<script>
+async function loadAlerts() {
+  const r = await API.get('/api/alerts?status=' + $('#astatus').value);
+  if (!r.ok) { $('#alerts').innerHTML = `<div class="empty">${esc(r.message)}</div>`; return; }
+  if (!r.data.length) { $('#alerts').innerHTML = '<div class="empty">无告警</div>'; return; }
+  $('#alerts').innerHTML = `<table><thead><tr>
+    <th>类型</th><th>级别</th><th>说明</th><th>持续</th><th>状态</th><th>时间</th><th></th>
+    </tr></thead><tbody>${r.data.map(a => `
+    <tr>
+      <td>${esc(a.kind)}</td>
+      <td><span class="pill ${a.level === 'error' ? 'bad' : 'warn'}">${esc(a.level)}</span></td>
+      <td>${esc(a.message)}</td>
+      <td>${a.is_ongoing ? `持续 ×${a.occurrence_count}` : '单次'}</td>
+      <td>${statusCN(a.status)}</td>
+      <td class="muted">${fmtTime(a.created_at)}</td>
+      <td>${a.status === 'closed' ? '' : `<button class="btn sm gray" onclick="closeAlert(${a.id})">处理</button>`}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+async function closeAlert(id) {
+  const r = await API.post(`/api/alerts/${id}/handle`, { status: 'closed', resolution: '已核查' });
+  if (!r.ok) { toast(r.message, 'err'); return; }
+  toast('已处理', 'ok'); loadAlerts();
+}
+
+async function loadLogs() {
+  const cat = $('#lcat').value;
+  const r = await API.get('/api/logs?limit=80' + (cat ? '&category=' + cat : ''));
+  if (!r.ok) { $('#logs').innerHTML = `<div class="empty">${esc(r.message)}</div>`; return; }
+  $('#logs').innerHTML = `<table><thead><tr>
+    <th>时间</th><th>分类</th><th>动作</th><th>鱼塘</th><th>任务</th><th>详情</th>
+    </tr></thead><tbody>${r.data.map(l => `
+    <tr>
+      <td class="muted">${fmtTime(l.created_at)}</td>
+      <td>${esc(l.category)}</td>
+      <td>${esc(l.action)}</td>
+      <td>${l.pond_id ?? '—'}</td>
+      <td>${l.task_id ?? '—'}</td>
+      <td class="muted" style="max-width:420px;overflow:hidden;text-overflow:ellipsis">${esc(l.detail || '')}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+async function loadConfig() {
+  const r = await API.get('/api/config');
+  if (!r.ok) { $('#config').innerHTML = `<div class="empty">${esc(r.message)}</div>`; return; }
+  $('#config').innerHTML = `<table><thead><tr>
+    <th>配置项</th><th>值</th><th>单位</th><th>说明</th><th>生效时间</th>
+    </tr></thead><tbody>${r.data.map(c => `
+    <tr>
+      <td>${esc(c.key)}</td><td><b>${esc(c.value)}</b></td><td>${esc(c.unit || '')}</td>
+      <td class="muted">${esc(c.note || '')}</td>
+      <td class="muted">${fmtTime(c.effective_at)}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadAlerts(); loadLogs(); loadConfig();
+  $('#astatus').onchange = loadAlerts;
+  $('#lcat').onchange = loadLogs;
+});
+</script>
+{% endblock %}
