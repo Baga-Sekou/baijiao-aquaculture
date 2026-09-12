@@ -1,11 +1,17 @@
 """视觉监控、疑似死鱼事件与异常告警接口（需求说明书 5.5 / 5.6）。"""
+import base64
+import os
+
 from flask import Blueprint, g, request
 
 from models import Alert, CameraView, Device, FishEvent
+from services import vision
 from services.common import (audit, can_view, fail, next_code, now, ok)
 from services.serialize import row
 
 bp = Blueprint("monitor", __name__)
+
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ---------------------------------------------------------------- 相机画面
@@ -137,15 +143,35 @@ def handle_alert(alert_id):
 # ---------------------------------------------------------------- 演示：模拟识别服务
 @bp.post("/ponds/<int:pond_id>/vision/detect")
 def mock_detect(pond_id):
-    """演示用视觉识别接口：输出疑似对象与置信度，作为待确认事件。
+    """视觉识别接口：优先对已有图片做真实分析；无图时按仿真流程演示。
 
-    未接入真实相机时，以样例图与模拟结果演示识别流程，来源标记为 sim。
+    未接入真实相机时，以样例图与模拟结果演示识别流程，来源标记为 sim；
+    提供 image_path（磁盘上已存在的图片）时走真实算法（cv-float-v1）。
     """
     if not g.user:
         return fail("未提供有效身份", 401)
     if not can_view(g.db, g.user, pond_id):
         return fail("无权访问该鱼塘", 403)
     body = request.get_json(silent=True) or {}
+
+    image_path = body.get("image_path")
+    disk_path = os.path.join(BACKEND_DIR, image_path) if image_path else None
+    if image_path and os.path.exists(disk_path):
+        result = vision.analyze_frame(disk_path)
+        if not result.get("ok"):
+            return fail(result.get("error", "帧分析失败"), 400)
+        ev = None
+        if result["suspected"]:
+            ev = _create_vision_event(g.db, pond_id, image_path,
+                                      result["confidence"], result["model_version"])
+        audit(g.db, "control", "vision_analyze", pond_id=pond_id, user_id=g.user.id,
+              detail={"image": image_path, "suspected": result["suspected"],
+                      "model_version": result["model_version"]})
+        g.db.commit()
+        return ok(result, event=row(ev, ["id", "code", "status", "confidence",
+                                         "model_version", "source"]) if ev else None,
+                  note="识别结果作为待确认事件，人工确认前不计入已确认数量")
+
     hit = bool(body.get("detected", False))
     if not hit:
         return ok({"detected": False, "note": "未检测到疑似对象",
@@ -154,13 +180,136 @@ def mock_detect(pond_id):
         code=next_code(g.db, FishEvent, "code", "EV"),
         pond_id=pond_id, kind="suspected_death", status="pending",
         detected_at=now(), position_desc=body.get("position_desc", "水面东北角"),
-        observation="识别到疑似死鱼对象",
+        observation="识别到疑似死鱼对象（仿真流程演示）",
         image_path=body.get("image_path", "static/samples/sample_death.jpg"),
         source="vision", model_version="vision-sim-v1",
         confidence=float(body.get("confidence", 0.83)),
     )
     g.db.add(ev)
     g.db.commit()
-    return ok({"detected": True, "event": row(ev, ["id", "code", "status",
+    return ok({"detected": True, "source": "sim", "event": row(ev, ["id", "code", "status",
                                                    "confidence", "model_version", "source"]),
-               "note": "识别结果作为待确认事件，人工确认前不计入已确认数量"})
+               "note": "仿真流程演示；接入相机后由 /vision/frame 上传帧做真实分析"})
+
+
+# ---------------------------------------------------------------- 相机帧上传与真实识别
+def _camera_device(db, pond_id, position="水上"):
+    d = db.query(Device).filter_by(pond_id=pond_id, kind="camera").first()
+    if not d:
+        d = Device(code=next_code(db, Device, "code", "CAM", width=3),
+                   pond_id=pond_id, kind="camera", location=position)
+        db.add(d)
+        db.flush()
+    return d
+
+
+def _create_vision_event(db, pond_id, image_path, confidence, model_version):
+    ev = FishEvent(
+        code=next_code(db, FishEvent, "code", "EV"),
+        pond_id=pond_id, kind="suspected_death", status="pending",
+        detected_at=now(), position_desc="相机画面识别",
+        observation="算法检测到疑似漂浮对象，待人工确认",
+        image_path=image_path, source="vision",
+        model_version=model_version, confidence=confidence,
+    )
+    db.add(ev)
+    return ev
+
+
+@bp.post("/ponds/<int:pond_id>/vision/frame")
+def upload_frame(pond_id):
+    """上传相机帧（multipart 文件或 JSON base64），保存并做真实分析。
+
+    - 更新视觉通道状态（在线、最近帧时间、图片路径）；
+    - 运行 cv-float-v1 帧分析（质量 + 漂浮物）；
+    - 检出疑似对象时生成待确认事件（source=vision），人工确认前不计数。
+    """
+    if not g.user:
+        return fail("未提供有效身份", 401)
+    if not can_view(g.db, g.user, pond_id):
+        return fail("无权访问该鱼塘", 403)
+
+    position = "水上"
+    data = None
+    ext = "jpg"
+    if request.files:
+        f = next(iter(request.files.values()))
+        position = request.form.get("position", position)
+        data = f.read()
+        ext = (f.filename.rsplit(".", 1)[-1] or "jpg").lower()[:4]
+    else:
+        body = request.get_json(silent=True) or {}
+        b64 = body.get("image_base64")
+        if not b64:
+            return fail("缺少图片：multipart file 字段或 JSON image_base64")
+        position = body.get("position", position)
+        try:
+            data = base64.b64decode(b64.split(",")[-1])
+        except Exception:
+            return fail("image_base64 解码失败")
+    if not data:
+        return fail("图片内容为空")
+    if ext not in ("jpg", "jpeg", "png"):
+        ext = "jpg"
+
+    image_path = vision.save_frame(pond_id, position, data, ext=ext)
+    disk_path = os.path.join(BACKEND_DIR, image_path)
+    device = _camera_device(g.db, pond_id, position)
+    view = (g.db.query(CameraView).filter_by(pond_id=pond_id, device_id=device.id).first())
+    if not view:
+        view = CameraView(device_id=device.id, pond_id=pond_id, position=position)
+        g.db.add(view)
+    view.online = True
+    view.last_frame_at = now()
+    view.image_path = image_path
+    view.note = f"最近帧来源：浏览器/终端上传（{position}）"
+
+    result = vision.analyze_frame(disk_path)
+    ev = None
+    if result.get("ok") and result.get("suspected"):
+        ev = _create_vision_event(g.db, pond_id, image_path,
+                                  result["confidence"], result["model_version"])
+    audit(g.db, "control", "vision_frame", pond_id=pond_id, device_id=device.id,
+          user_id=g.user.id,
+          detail={"image": image_path, "suspected": result.get("suspected"),
+                  "quality": result.get("quality")})
+    g.db.commit()
+    resp = result if result.get("ok") else {"ok": False, "error": result.get("error")}
+    resp.update({
+        "image_path": image_path,
+        "camera": {"device_id": device.id, "position": position,
+                   "online": True, "last_frame_at": view.last_frame_at.strftime("%Y-%m-%d %H:%M:%S")},
+    })
+    if ev:
+        resp["event"] = row(ev, ["id", "code", "status", "confidence",
+                                 "model_version", "source"])
+    return ok(resp, note="识别结果作为待确认事件，人工确认前不计入已确认数量")
+
+
+@bp.post("/ponds/<int:pond_id>/vision/ocr")
+def ocr(pond_id):
+    """图片文字识别（称重单 / 饲料袋标签）。依赖未安装时明确说明，不做假识别。"""
+    if not g.user:
+        return fail("未提供有效身份", 401)
+    if not can_view(g.db, g.user, pond_id):
+        return fail("无权访问该鱼塘", 403)
+    if request.files:
+        data = next(iter(request.files.values())).read()
+    else:
+        body = request.get_json(silent=True) or {}
+        b64 = body.get("image_base64")
+        if not b64:
+            return fail("缺少图片：multipart file 字段或 JSON image_base64")
+        try:
+            data = base64.b64decode(b64.split(",")[-1])
+        except Exception:
+            return fail("image_base64 解码失败")
+    image_path = vision.save_frame(pond_id, "ocr", data)
+    disk_path = os.path.join(BACKEND_DIR, image_path)
+    text, err = vision.ocr_text(disk_path)
+    audit(g.db, "control", "vision_ocr", pond_id=pond_id, user_id=g.user.id,
+          detail={"image": image_path, "ok": text is not None})
+    g.db.commit()
+    if err:
+        return fail(err, 200, reason="ocr_unavailable")
+    return ok({"text": text, "image_path": image_path})

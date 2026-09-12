@@ -5,3 +5,10 @@ PyMySQL==1.2.0
 python-dotenv>=1.0
 requests>=2.31
 pyserial>=3.5
+waitress>=3.0        # 常规模式的生产级 WSGI 服务器
+
+# ---- 可选：视觉识别（相机帧分析 / OCR）----
+# 未安装时后端可正常启动，相关接口会明确提示依赖缺失，不返回伪结果
+opencv-python>=4.9
+pillow>=10.0
+pytesseract>=0.3.10  # 需另装 tesseract-ocr 可执行程序（含中文包 chi_sim）

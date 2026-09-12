@@ -99,6 +99,28 @@ python scripts/seed_demo.py        # 生成近 30 天环境曲线、若干投喂
 python tests/test_acceptance.py    # 跑第 9 章验收场景，输出 docs/验收测试记录.json
 ```
 
+### 1.9 性能基准（需求书 8.4）
+
+```bash
+python scripts/benchmark.py --rows 200    # 需后端已启动；输出 docs/性能测试记录.md
+```
+
+报告包含：库内记录规模、单条/批量采样写入吞吐（条/秒）、常用查询接口
+平均与 p95 耗时。
+
+### 1.10 微信小程序（可选）
+
+`miniprogram/` 为原生小程序脚手架：
+
+1. 用微信开发者工具「导入项目」选择 `miniprogram/` 目录（测试号即可）；
+2. 把 `miniprogram/utils/api.js` 里的 `BASE_URL` 改成电脑局域网 IP；
+3. 后端 `.env` 设 `APP_HOST=0.0.0.0` 后重启，手机预览即可联调。
+
+### 1.11 部署口径
+
+默认 `APP_DEBUG=0`，`python backend/app.py` 以 **waitress**（多线程生产级 WSGI）
+运行；仅本地开发设 `APP_DEBUG=1` 才进入 Flask 调试模式。
+
 ---
 
 ## 2. 目录结构
@@ -111,33 +133,40 @@ python tests/test_acceptance.py    # 跑第 9 章验收场景，输出 docs/验�
 │   ├── baijiao.db                SQLite 数据库文件（首次运行自动生成）
 │   └── sample/                   内置的两年课堂测试 CSV
 ├── backend/
-│   ├── app.py                    应用入口（Flask，含页面路由）
+│   ├── app.py                    应用入口（Flask；APP_DEBUG=0 时用 waitress 运行）
 │   ├── database.py               连接与会话（默认 SQLite，可切 MySQL）
 │   ├── models.py                 领域模型（对应需求书 7.1 的业务记录）
 │   ├── api/                      接口层
 │   │   ├── ponds.py              鱼塘、批次、用户、授权
 │   │   ├── env.py                环境测量、摄食反馈、终端注册
 │   │   ├── feeding.py            建议、任务、回执、核查、超时巡检
-│   │   ├── monitor.py            相机、疑似死鱼事件、告警
-│   │   └── ops.py                看板、多塘比较、运营记录、日志、配置
+│   │   ├── monitor.py            相机、帧上传识别、OCR、疑似死鱼事件、告警
+│   │   ├── ops.py                看板、多塘比较、运营记录、日志、配置
+│   │   ├── model.py              AI 模型训练与预测（生长/投喂量/水质）
+│   │   └── community.py          交流帖与养殖排行榜（需求书 5.11）
 │   ├── services/                 业务规则层
 │   │   ├── common.py             编号、配置、审计、权限、时间解析
 │   │   ├── environment.py        上传校验、有效性、日内曲线与统计特征
 │   │   ├── suggestion.py         投喂建议生成（含演示规则与规则版本）
-│   │   └── task_service.py       任务幂等、设备占用、回执、超时、核查
+│   │   ├── task_service.py       任务幂等、设备占用、回执、超时、核查
+│   │   ├── ml.py                 纯标准库线性回归模型（训练/预测/落盘）
+│   │   └── vision.py             OpenCV 帧分析与可选 OCR
 │   ├── templates/                Web 看板页面（响应式，兼顾移动端）
 │   └── static/                   CSS / JS（无外部依赖，离线可演示）
+├── miniprogram/                  微信小程序脚手架（鱼塘/单塘/交流三页）
 ├── simulator/terminal.py         采集控制终端仿真器（含故障注入）
 ├── scripts/
 │   ├── check_env.py              环境自检（Python/依赖/数据库/端口）
 │   ├── init_db.py                建库建表 + 基础数据
 │   ├── import_csv.py             导入课堂 CSV（去重、冲突处理）
 │   ├── seed_demo.py              生成演示数据
+│   ├── benchmark.py              性能基准（记录数/采样吞吐/查询耗时，8.4）
 │   └── reset_runtime.py          重置运行数据
-├── tests/test_acceptance.py      验收场景测试
+├── tests/test_acceptance.py      验收场景测试（含模型/识别/导入/交流等 20 项）
 └── docs/
     ├── 设计说明.md               分层设计、状态机、异常策略
-    └── 验收测试记录.md/.json     验收场景实际结果
+    ├── 验收测试记录.md/.json     验收场景实际结果
+    └── 性能测试记录.md           8.4 性能基准实测
 ```
 
 ---
@@ -175,14 +204,29 @@ pending 待下发
 ## 4. 交付内容与说明
 
 - **已实现**：后端接口与业务规则、采集终端仿真、Web 看板与移动端响应式页面、
-  验收场景测试。
-- **按需求书 2.3 标注为后续扩展**：微信小程序（当前用移动端 Web 代替）、
-  真实硬件接入、AI 模型预测（投喂量 / 生长 / 水质）、视觉识别效果。
-  相关接口位置已预留，未实现的能力不返回伪结果。
+  验收场景测试；以及原列为扩展的以下能力：
+  - **AI 模型预测**（需求书 2.3）：生长（称重记录回归 → 达标日期）、
+    投喂量（日投喂量对生物量+日均温回归）、水质（最近 72 小时趋势短期外推）。
+    训练/预测/版本与 R²、MAE 指标见 `services/ml.py` 与 `api/model.py`；
+    数据不足时明确返回原因，不返回伪预测。
+  - **视觉识别**（需求书 5.5）：浏览器/终端上传相机帧（`POST /api/ponds/<id>/vision/frame`），
+    OpenCV 水面漂浮物启发式检测（`cv-float-v1`）+ 画面质量检查，检出生成待确认事件；
+    另提供 OCR 接口（`/vision/ocr`，需本机安装 tesseract，未装时明确提示）。
+  - **交流与排行榜**（需求书 5.11）：发帖/回帖/关闭（`/api/community/posts`）、
+    按饲料系数 FCR 排名（`/api/leaderboard`），数据不足的塘明确不参与排名。
+  - **微信小程序**：`miniprogram/` 内置可运行的脚手架（鱼塘/单塘/交流三个页面，
+    `wx.request` 直连后端），用微信开发者工具打开即可联调。
+- **未实现 / 明确说明**：真实硬件接入（相机以浏览器摄像头/上传图片代接入）、
+  深度学习视觉模型（当前为启发式算法，结果需人工确认）。
+  未实现的能力不返回伪结果。
 
 ## 5. 已知限制
 
-- 视觉识别为**仿真流程演示**（`vision-sim-v1`），未接入真实相机与识别模型。
-- 模型预测接口未实现，调用会明确返回「尚未接入」，不返回伪预测。
+- 视觉识别为**启发式算法**（`cv-float-v1`，亮残差+连通域），非深度模型，
+  对反光/水草/水花可能误报；识别结果仅作为待确认事件，需人工确认。
+- OCR 依赖本机安装 tesseract-ocr（含中文包 chi_sim）；未安装时接口明确返回
+  `ocr_unavailable`，不做假识别。
+- AI 预测为可解释的线性/趋势模型（非黑盒深度学习），输出均带版本、样本数、
+  R²/MAE 与适用边界；外推范围有限（生长 ≤180 天，水质 ≤24 小时）。
 - 演示规则（`rule-v1.0`）为课堂联调用，非养殖阈值；界面已标注「演示规则」。
-- 微信小程序未实现，移动端由响应式 Web 承担。
+- 小程序未配置 AppID，真机预览需自行填入并修改 `miniprogram/utils/api.js` 的 BASE_URL。

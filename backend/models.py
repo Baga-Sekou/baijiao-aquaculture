@@ -392,6 +392,36 @@ class SysConfig(Base):
     updated_at = Column(DateTime, default=now, onupdate=now)
 
 
+# ---------------------------------------------------------------- 交流与排行榜（需求书 5.11 扩展）
+class CommunityPost(Base):
+    """交流帖。养殖经验交流；排行榜数据另行实时计算，不落库。"""
+    __tablename__ = "community_posts"
+    id = Column(Integer, primary_key=True)
+    pond_id = Column(Integer, ForeignKey("ponds.id"))   # 可不关联鱼塘（纯经验交流）
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    title = Column(String(128), nullable=False)
+    content = Column(Text, nullable=False)
+    category = Column(String(24), default="经验交流")    # 经验交流 / 问题求助 / 行情信息
+    status = Column(String(16), default="open")          # open / closed
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+    replies = relationship("PostReply", back_populates="post",
+                           cascade="all, delete-orphan")
+
+
+class PostReply(Base):
+    """交流帖回复。"""
+    __tablename__ = "post_replies"
+    id = Column(Integer, primary_key=True)
+    post_id = Column(Integer, ForeignKey("community_posts.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=now)
+
+    post = relationship("CommunityPost", back_populates="replies")
+
+
 class ImportBatch(Base):
     """CSV 导入批次，保留来源与源记录编号，避免两年 id 冲突。"""
     __tablename__ = "import_batches"

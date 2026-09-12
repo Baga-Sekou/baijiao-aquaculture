@@ -1,0 +1,15 @@
+{
+  "pages": [
+    "pages/index/index",
+    "pages/pond/pond",
+    "pages/community/community"
+  ],
+  "window": {
+    "navigationBarTitleText": "白蕉水产养殖",
+    "navigationBarBackgroundColor": "#0b1f33",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#f4f6f8"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

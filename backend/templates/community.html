@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}交流与排行榜 · 白蕉水产养殖管理平台{% endblock %}
+{% block content %}
+<h1>交流与排行榜</h1>
+
+<!-- 养殖排行榜 -->
+<div class="card">
+  <h2>养殖排行榜</h2>
+  <div class="row" style="margin-bottom:10px">
+    <select class="input" id="lbDays" style="width:auto">
+      <option value="7">近 7 天</option>
+      <option value="30" selected>近 30 天</option>
+      <option value="90">近 90 天</option>
+    </select>
+    <button class="btn" id="btnLb">刷新排行</button>
+  </div>
+  <div id="lbBox"><div class="empty">加载中…</div></div>
+  <p class="muted" style="margin-top:8px">
+    饲料系数越低说明饲料转化效率越高；数据不足的塘不参与排名，不凑名次。
+    各塘条件（密度、苗种、天气）不同，排名仅供交流参考。
+  </p>
+</div>
+
+<!-- 交流区 -->
+<div class="grid c2" style="margin-top:14px">
+  <div class="card">
+    <h2>发布交流</h2>
+    <div class="inline" style="flex-direction:column;align-items:stretch;gap:8px">
+      <div><label class="fld">标题</label>
+        <input class="input" id="postTitle" placeholder="例如：低温期投喂量怎么调？"></div>
+      <div><label class="fld">分类</label>
+        <select class="input" id="postCat">
+          <option>经验交流</option><option>问题求助</option><option>行情信息</option>
+        </select></div>
+      <div><label class="fld">内容</label>
+        <textarea class="input" id="postContent" rows="4"
+          placeholder="分享经验或提出问题；请勿发布广告与不实信息"></textarea></div>
+      <div><button class="btn green" id="btnPost">发布</button></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>经验交流</h2>
+    <div class="row" style="margin-bottom:8px">
+      <select class="input" id="catFilter" style="width:auto">
+        <option value="">全部分类</option>
+      </select>
+      <button class="btn ghost" id="btnRefresh">刷新</button>
+    </div>
+    <div id="postList"><div class="empty">加载中…</div></div>
+  </div>
+</div>
+
+<!-- 帖子详情 -->
+<div class="card" style="margin-top:14px" id="postDetail" hidden>
+  <h2 id="pdTitle"></h2>
+  <div id="pdBody"></div>
+</div>
+{% endblock %}
+{% block script %}
+<script>
+async function loadBoard() {
+  const days = $('#lbDays').value;
+  const r = await API.get(`/api/leaderboard?days=${days}`);
+  const box = $('#lbBox');
+  if (!r.ok) { box.innerHTML = `<div class="empty">${esc(r.message)}</div>`; return; }
+  if (!r.data.length) { box.innerHTML = '<div class="empty">暂无可比较的鱼塘</div>'; return; }
+  box.innerHTML = `<div class="grid c2" style="margin-bottom:12px">
+      <div><h3 style="margin:4px 0">饲料系数对比（越低越好）</h3><div id="lbFcrBars"></div></div>
+      <div><h3 style="margin:4px 0">生长速度对比</h3><div id="lbGrowthBars"></div></div>
+    </div>
+    <table><thead><tr>
+    <th>名次</th><th>鱼塘</th><th>饲料系数 FCR</th><th>生长速度</th><th>投喂量</th><th>告警</th><th>口径</th>
+    </tr></thead><tbody>${r.data.map(e => `
+    <tr>
+      <td>${e.rank ? (e.rank === 1 ? '🥇 ' : e.rank === 2 ? '🥈 ' : e.rank === 3 ? '🥉 ' : '') + e.rank : '—'}</td>
+      <td>${esc(e.pond.name)}</td>
+      <td>${e.fcr != null ? `<b>${e.fcr}</b>` : `<span class="pill warn">未参与</span>`}</td>
+      <td>${e.growth_rate_g_day != null ? e.growth_rate_g_day + ' g/天' : '—'}</td>
+      <td>${e.feed_window_kg} kg</td>
+      <td>${e.alerts}</td>
+      <td class="muted">${esc(e.fcr_basis || e.not_ranked_reason || '')}
+        ${e.growth_basis ? `<br>${esc(e.growth_basis)}` : ''}</td>
+    </tr>`).join('')}</tbody></table>
+    <p class="muted">${esc(r.note)}</p>`;
+  const rows = r.data || [];
+  const ranked = rows.filter(x => x.rank);
+  barChart($('#lbFcrBars'), ranked.map(e => ({
+    name: e.pond.name, value: e.fcr, unit: '',
+    color: e.rank === 1 ? 'linear-gradient(90deg,#548235,#8cbf5f)' : undefined })),
+    { note: '饲料系数 = 饲料消耗 / 鱼体增重；数据不足的塘未参与' });
+  barChart($('#lbGrowthBars'), rows.filter(e => e.growth_rate_g_day != null).map(e => ({
+    name: e.pond.name, value: e.growth_rate_g_day, unit: ' g/天',
+    color: 'linear-gradient(90deg,#2E75B6,#7fb3d5)' })));
+}
+
+async function loadPosts() {
+  const cat = $('#catFilter').value;
+  const r = await API.get(`/api/community/posts${cat ? '?category=' + encodeURIComponent(cat) : ''}`);
+  const box = $('#postList');
+  if (!r.ok) { box.innerHTML = `<div class="empty">${esc(r.message)}</div>`; return; }
+  if (!r.data.length) { box.innerHTML = '<div class="empty">还没有帖子，来发第一帖</div>'; return; }
+  box.innerHTML = r.data.map(p => `
+    <div class="reason" style="margin-bottom:8px;cursor:pointer" onclick="openPost(${p.id})">
+      <b>${esc(p.title)}</b>
+      <span class="pill">${esc(p.category)}</span>
+      ${p.status === 'closed' ? '<span class="pill warn">已关闭</span>' : ''}
+      <br><span class="muted">${esc(p.author.name)} · ${fmtTime(p.created_at)} · 回复 ${p.reply_count}</span>
+      ${p.latest_reply ? `<br><span class="muted">最新回复：${esc(p.latest_reply.content.slice(0, 40))}</span>` : ''}
+    </div>`).join('');
+}
+
+async function openPost(id) {
+  const r = await API.get(`/api/community/posts/${id}`);
+  if (!r.ok) { toast(r.message, 'err'); return; }
+  const d = r.data;
+  $('#postDetail').hidden = false;
+  $('#pdTitle').textContent = d.title;
+  $('#pdBody').innerHTML = `
+    <div class="reason">
+      <b>${esc(d.author.name)}</b> · ${fmtTime(d.created_at)}
+      <span class="pill">${esc(d.category)}</span>
+      ${d.status === 'closed' ? '<span class="pill warn">已关闭</span>' : ''}
+      <br>${esc(d.content)}
+    </div>
+    <div style="margin-top:10px">
+      ${d.replies.map(x => `<div class="reason" style="margin-bottom:6px">
+        <b>${esc(x.author.name)}</b> <span class="muted">${fmtTime(x.created_at)}</span>
+        <br>${esc(x.content)}</div>`).join('') || '<div class="empty">暂无回复</div>'}
+    </div>
+    ${d.status === 'open' ? `
+    <div class="inline" style="margin-top:10px">
+      <input class="input" id="replyInput" placeholder="写下你的回复…">
+      <button class="btn green" onclick="sendReply(${d.id})">回复</button>
+    </div>
+    <button class="btn gray sm" style="margin-top:6px" onclick="closePost(${d.id})">关闭帖子</button>` : ''}`;
+  $('#postDetail').scrollIntoView({ behavior: 'smooth' });
+}
+
+async function sendReply(id) {
+  const inp = $('#replyInput');
+  if (!inp.value.trim()) { toast('请输入回复内容', 'err'); return; }
+  const r = await API.post(`/api/community/posts/${id}/replies`, { content: inp.value });
+  if (!r.ok) { toast(r.message, 'err'); return; }
+  toast('已回复', 'ok'); openPost(id); loadPosts();
+}
+
+async function closePost(id) {
+  const r = await API.post(`/api/community/posts/${id}/close`, {});
+  if (!r.ok) { toast(r.message, 'err'); return; }
+  toast('帖子已关闭', 'ok'); openPost(id); loadPosts();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadBoard(); loadPosts();
+  $('#btnLb').onclick = loadBoard;
+  $('#lbDays').onchange = loadBoard;
+  $('#btnRefresh').onclick = loadPosts;
+  $('#catFilter').onchange = loadPosts;
+  API.get('/api/community/posts').then(r => {
+    if (!r.ok) return;
+    const cats = [...new Set(r.data.map(p => p.category))];
+    $('#catFilter').innerHTML += cats.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  });
+  $('#btnPost').onclick = async () => {
+    const title = $('#postTitle').value.trim(), content = $('#postContent').value.trim();
+    if (!title || !content) { toast('标题和内容不能为空', 'err'); return; }
+    const r = await API.post('/api/community/posts', {
+      title, content, category: $('#postCat').value,
+    });
+    if (!r.ok) { toast(r.message, 'err'); return; }
+    toast('已发布', 'ok');
+    $('#postTitle').value = ''; $('#postContent').value = '';
+    loadPosts();
+  };
+});
+</script>
+{% endblock %}

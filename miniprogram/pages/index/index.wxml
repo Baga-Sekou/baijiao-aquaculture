@@ -1,0 +1,19 @@
+<view wx:if="{{loading}}" class="card muted">加载中…</view>
+<view wx:elif="{{error}}" class="card">
+  <view class="title">{{error}}</view>
+  <view class="muted">手机真机预览时请把 utils/api.js 的 BASE_URL 改成电脑局域网 IP，并在手机上允许该请求。</view>
+  <view class="btn ghost" style="margin-top:16rpx" bindtap="load">重试</view>
+</view>
+<view wx:else>
+  <view class="card" wx:for="{{ponds}}" wx:key="id" bindtap="openPond" data-id="{{item.id}}">
+    <view class="title">{{item.name}}</view>
+    <view class="muted">
+      {{item.code}} · {{item.area}}{{item.area_unit}}
+      <block wx:if="{{item.active_batch}}"> · 批次 {{item.active_batch.code}}</block>
+    </view>
+    <view style="margin-top:8rpx">
+      <text class="pill">{{item.terminal && item.terminal.status === 'online' ? '终端在线' : '终端离线'}}</text>
+      <text class="pill" wx:if="{{item.active_batch}}">{{item.active_batch.species}}</text>
+    </view>
+  </view>
+</view>

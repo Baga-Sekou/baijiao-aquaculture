@@ -6,6 +6,7 @@
 用法：
     python tests/test_acceptance.py
 """
+import glob
 import json
 import os
 import sys
@@ -282,15 +283,294 @@ def s_permission():
 
 
 def s_model_interface():
-    """模型接口：未配置时返回明确状态，不返回伪预测。"""
-    code, d = call("GET", "/api/ponds/1/model/predict?target=growth", user="wang")
-    if code == 404:
-        check("模型调用", "请求预测接口", "输出目标/单位/时间范围/版本明确，失败不返回伪预测",
-              True, "模型接口尚未接入（按需求书 2.3 标注为后续扩展，未返回伪预测）")
-    else:
-        check("模型调用", "请求预测接口", "明确输出且不伪预测",
-              bool(d.get("ok") and ("unit" in str(d) or "note" in str(d))),
-              json.dumps(d, ensure_ascii=False)[:120])
+    """模型接口：训练后可预测；未训练/数据不足时明确报错，不返回伪预测。
+
+    全程用 A02：与 CSV 导入、多塘比较等场景的数据隔离。
+    """
+    reset()
+    from datetime import datetime, timedelta
+    today = datetime.now()
+
+    # 1) 生长数据：5 次称重，覆盖 60 天
+    for d, w in ((60, 50), (45, 120), (30, 200), (15, 290), (0, 380)):
+        ts = (today - timedelta(days=d)).strftime("%Y-%m-%d %H:%M:%S")
+        call("POST", f"/api/ponds/{FEED_POND}/weigh", user="owner",
+             json={"avg_weight": w, "sample_count": 30, "weighed_at": ts})
+
+    # 2) 水质数据：最近 24 小时水温/溶氧逐小时
+    for h in range(25, -1, -1):
+        ts = (today - timedelta(hours=h)).strftime("%Y-%m-%d %H:%M:%S")
+        call("POST", "/api/measurements", json={
+            "pond_id": FEED_POND, "metric": "temperature",
+            "value": 24 + 2 * ((24 - h) % 12) / 12.0, "unit": "℃",
+            "collected_at": ts, "source": "sim"})
+        call("POST", "/api/measurements", json={
+            "pond_id": FEED_POND, "metric": "oxygen",
+            "value": 6.0 + (24 - h) * 0.02, "unit": "mg/L",
+            "collected_at": ts, "source": "sim"})
+
+    # 3) 投喂历史：8 天，各一天已完成投喂。任务创建时间不可回填，
+    #    历史训练样本直接播种入库（接口行为由其余场景覆盖）。
+    for d in range(8, 0, -1):
+        ts = (today - timedelta(days=d)).strftime("%Y-%m-%d %H:%M:%S")
+        call("POST", "/api/measurements", json={
+            "pond_id": FEED_POND, "metric": "temperature", "value": 25.0 + d * 0.1,
+            "unit": "℃", "collected_at": ts, "source": "sim"})
+    from database import SessionLocal
+    from models import FeedingTask
+    _db = SessionLocal()
+    try:
+        for d in range(8, 0, -1):
+            created = today - timedelta(days=d)
+            _db.add(FeedingTask(
+                task_no=f"TK-ML-{d:02d}", request_no=f"REQ-ML-{d:02d}",
+                pond_id=FEED_POND, round_no=f"ML-{d}",
+                suggested_amount=40 + d * 6, confirm_amount=40 + d * 6,
+                actual_amount=40 + d * 6, actual_source="manual", unit="kg",
+                status="done", device_locked=False,
+                approved_at=created, dispatched_at=created, finished_at=created,
+                created_at=created, updated_at=created))
+        _db.commit()
+    finally:
+        _db.close()
+
+    # 4) 训练三个目标
+    _, tr = call("POST", f"/api/ponds/{FEED_POND}/model/train", user="owner",
+                 json={"target": "all"})
+    ok3 = all(tr["data"][k]["ok"] for k in ("growth", "feed", "water_quality"))
+    # 5) 预测三个目标，输出必须含目标/单位/版本/依据
+    _, pg = call("GET", f"/api/ponds/{FEED_POND}/model/predict?target=growth", user="owner")
+    _, pf = call("GET", f"/api/ponds/{FEED_POND}/model/predict?target=feed&horizon=3", user="owner")
+    _, pw = call("GET", f"/api/ponds/{FEED_POND}/model/predict?target=water_quality&horizon=6",
+                 user="owner")
+    fields_ok = (pg.get("ok") and pg["data"]["unit"] == "g" and pg["data"]["version"]
+                 and pf.get("ok") and pf["data"]["unit"] == "kg"
+                 and len(pf["data"]["series"]) == 3
+                 and pw.get("ok") and pw["data"]["horizon_hours"] == 6)
+    # 6) 反例：删除模型文件后预测生长 → 明确报错而非伪数据
+    model_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "data", "models")
+    for f in ("pond_1_growth.json",):
+        p = os.path.join(model_dir, f)
+        if os.path.exists(p):
+            os.remove(p)
+    _, pb = call("GET", "/api/ponds/1/model/predict?target=growth", user="owner")
+    honest = (not pb.get("ok")) and pb.get("reason") in ("model_not_trained", "insufficient_data")
+    passed = ok3 and fields_ok and honest
+    check("模型训练与测试", "用 60 天称重/8 天投喂/24 小时水质训练三个模型并预测",
+          "输出目标/单位/时间范围/版本明确；未训练时明确报错，不返回伪预测", passed,
+          f"训练 growth/feed/water 全成功={ok3}；生长预测当前 {pg.get('data', {}).get('current_weight_g')}g、"
+          f"日增 {pg.get('data', {}).get('daily_gain_g')}g、达标 {pg.get('data', {}).get('days_to_target')} 天；"
+          f"投喂预测明日 {pf.get('data', {}).get('series', [{}])[0].get('amount_kg')}kg；"
+          f"未训练塘返回 reason={pb.get('reason')}")
+
+
+def s_fish_event():
+    """死鱼事件：人工登记 → 确认 → 处理 / 误报，状态流转留痕。"""
+    reset()
+    _, e1 = call("POST", "/api/ponds/1/fish-events", user="wang",
+                 json={"position_desc": "水面东侧", "observation": "发现 1 尾翻肚", "source": "manual"})
+    c1 = e1["data"]["code"]
+    _, h1 = call("POST", f"/api/fish-events/{c1}/handle", user="wang", json={"action": "confirm"})
+    _, h2 = call("POST", f"/api/fish-events/{c1}/handle", user="wang",
+                 json={"action": "process", "note": "已捞除并记录"})
+    _, e2 = call("POST", "/api/ponds/1/fish-events", user="wang",
+                 json={"position_desc": "水面西侧", "source": "manual"})
+    c2 = e2["data"]["code"]
+    _, h3 = call("POST", f"/api/fish-events/{c2}/handle", user="wang",
+                 json={"action": "false_alarm", "note": "气泡反光误判"})
+    _, lst = call("GET", "/api/ponds/1/fish-events", user="wang")
+    by = {x["code"]: x for x in lst["data"]}
+    passed = (h1["data"]["status"] == "processing" and h2["data"]["status"] == "handled"
+              and h3["data"]["status"] == "false_alarm"
+              and by[c1]["status"] == "handled" and by[c2]["status"] == "false_alarm")
+    check("死鱼事件", "登记两条疑似事件，分别确认-处理与标记误报",
+          "识别/登记结果为待确认事件，确认与处理留痕", passed,
+          f"事件1 {by[c1]['status']}，事件2 {by[c2]['status']}（确认前均不计入已确认数量）")
+
+
+def s_compare():
+    """多塘比较：窗口统计可查，字段完整。"""
+    reset()
+    seed_env(1, 26.0)
+    seed_env(2, 27.0)
+    _, d = call("GET", "/api/compare?days=7", user="owner")
+    rows = d.get("data") or []
+    fields = ("pond", "avg_temperature", "avg_oxygen", "feed_kg", "alerts", "medicine_count")
+    passed = (d.get("ok") and len(rows) >= 2
+              and all(all(f in r for f in fields) for r in rows))
+    check("多塘比较", "两个塘都有近期数据时查询 7 天窗口比较",
+          "每塘返回环境均值/投喂/告警/用药等可比指标", passed,
+          f"返回 {len(rows)} 个塘；" + "；".join(
+              f"{r['pond']['code']} 水温均值={r['avg_temperature']} 投喂={r['feed_kg']}kg"
+              for r in rows))
+
+
+def s_plan_ops():
+    """计划与运营：计划、称重、用药、成本、饲料系数、导出。"""
+    reset()
+    seed_env()
+    from datetime import datetime, timedelta
+    today = datetime.now()
+    # 计划
+    _, p = call("POST", "/api/ponds/1/plans", user="wang",
+                json={"content": "巡塘并记录水色", "cycle": "daily",
+                      "due_time": (today + timedelta(hours=4)).strftime("%Y-%m-%d %H:%M:%S")})
+    _, pc = call("POST", f"/api/plans/{p['data']['id']}/complete", user="wang", json={})
+    _, pl = call("GET", "/api/ponds/1/plans", user="wang")
+    plan_ok = pc["data"]["completed"] is True and any(x["id"] == p["data"]["id"] for x in pl["data"])
+    # 称重两次（间隔 30 天）+ 期间投喂 → 饲料系数可算
+    for d, w in ((30, 120.0), (0, 210.0)):
+        call("POST", "/api/ponds/1/weigh", user="wang",
+             json={"avg_weight": w, "sample_count": 30,
+                   "weighed_at": (today - timedelta(days=d)).strftime("%Y-%m-%d %H:%M:%S")})
+    sg = fresh_suggestion(user="owner")
+    _, t = call("POST", "/api/ponds/1/tasks", user="owner",
+                json={"request_no": "REQ-OPS-" + uuid.uuid4().hex[:8],
+                      "suggestion_code": sg["code"], "confirm_amount": 88.8,
+                      "change_reason": "运营场景固定投喂 88.8kg"})
+    call("POST", "/api/receipts", json={"task_no": t["data"]["task_no"], "kind": "finish",
+                                        "status": "done", "actual_amount": 88.8})
+    _, fs = call("GET", "/api/ponds/1/feed-stats?days=60", user="owner")
+    fcr_ok = fs["data"]["fcr"] is not None and "饲料消耗" in fs["data"]["fcr_note"]
+    # 用药与成本
+    _, m = call("POST", "/api/ponds/1/medicine", user="wang",
+                json={"item": "聚维酮碘", "amount": 2.5, "unit": "L"})
+    _, ml = call("GET", "/api/ponds/1/medicine", user="wang")
+    _, c = call("POST", "/api/ponds/1/costs", user="owner",
+                json={"kind": "actual", "item": "鲈鱼配合饲料", "amount": 6800, "unit": "元"})
+    med_ok = any(x["item"] == "聚维酮碘" for x in ml["data"])
+    # 导出：含时间/单位/来源
+    _, ex = call("GET", "/api/ponds/1/export", user="owner")
+    rows = ex.get("data") or []
+    export_ok = (ex.get("ok") and rows
+                 and all(("time" in r and "unit" in r and "source" in r) for r in rows))
+    passed = plan_ok and fcr_ok and med_ok and export_ok
+    check("计划与运营", "建计划并完成；两次称重+投喂后查询饲料系数；登记用药与成本；导出记录",
+          "各接口返回完整且口径可解释，导出含时间/单位/来源", passed,
+          f"计划完成={plan_ok}，FCR={fs['data']['fcr']}（{fs['data']['fcr_note'][:30]}…），"
+          f"用药登记={med_ok}，导出 {len(rows)} 条含来源={export_ok}")
+
+
+def s_vision():
+    """视频与识别：上传帧 → 真实分析 → 待确认事件；OCR 依赖未装时明确说明。"""
+    reset()
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        check("视频与识别", "上传相机帧做识别", "返回分析结果与待确认事件",
+              False, "测试机未安装 opencv，跳过")
+        return
+    # 合成一帧"水面"：暗色背景 + 一块亮色漂浮物
+    rng = np.random.default_rng(7)
+    frame = np.full((360, 480, 3), 52, dtype=np.uint8)
+    frame = cv2.GaussianBlur(frame, (21, 21), 0) + rng.normal(0, 3, frame.shape).astype(np.uint8)
+    cv2.ellipse(frame, (240, 180), (34, 13), 20, 0, 360, (215, 210, 200), -1)
+    okenc, buf = cv2.imencode(".jpg", frame)
+    _, up = call("POST", f"/api/ponds/1/vision/frame", user="wang",
+                 files={"file": ("frame.jpg", buf.tobytes(), "image/jpeg")},
+                 data={"position": "水上"})
+    d = up.get("data") or {}
+    suspected = bool(d.get("suspected"))
+    ev = d.get("event")
+    # 相机通道状态更新为在线
+    _, cams = call("GET", "/api/ponds/1/cameras", user="wang")
+    cam_online = bool(cams.get("data")) and any(c["online"] for c in cams["data"])
+    # 事件列表出现识别来源的待确认事件
+    _, evs = call("GET", "/api/ponds/1/fish-events", user="wang")
+    ev_ok = ev is not None and any(x["code"] == ev["code"] and x["status"] == "pending"
+                                   and x["source"] == "vision" for x in evs["data"])
+    # OCR：无 tesseract 时必须明确返回 ocr_unavailable，不返回假文本
+    _, oc = call("POST", "/api/ponds/1/vision/ocr", user="wang",
+                 files={"file": ("doc.jpg", buf.tobytes(), "image/jpeg")})
+    ocr_honest = (not oc.get("ok") and oc.get("reason") == "ocr_unavailable") or oc.get("ok")
+    passed = up.get("ok") and suspected and cam_online and ev_ok and ocr_honest
+    check("视频与识别", "上传合成相机帧（含亮色漂浮物）并查询相机与事件；再传图做 OCR",
+          "帧被真实分析并生成待确认事件；相机转在线；OCR 依赖缺失时明确说明", passed,
+          f"检出漂浮物={suspected} 置信度={d.get('confidence')} 模型={d.get('model_version')}，"
+          f"相机在线={cam_online}，事件待确认={ev_ok}，OCR 明确={ocr_honest}")
+
+
+def s_data_import():
+    """数据导入：CSV 导入成功且重复导入不重复写入。"""
+    import_csv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                   "data", "sample")
+    csvs = sorted(glob.glob(os.path.join(import_csv_path, "*.csv")))
+    if not csvs:
+        check("数据导入", "导入内置 CSV", "写入并保留来源", False, "未找到内置 CSV")
+        return
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                    "scripts"))
+    reset()
+    import import_csv
+    db_path_note = "进程内直连同一 SQLite"
+    from database import SessionLocal
+    from models import Measurement as M
+
+    def count_rows():
+        db = SessionLocal()
+        try:
+            return db.query(M).filter(M.source == "csv").count()
+        finally:
+            db.close()
+
+    db = SessionLocal()
+    try:
+        ib1 = import_csv.import_one(db, csvs[0])
+        n1 = count_rows()
+        ib2 = import_csv.import_one(db, csvs[0])   # 重复导入
+        n2 = count_rows()
+    finally:
+        db.close()
+    passed = (ib1 and ib1.rows_inserted > 0 and ib2.rows_inserted == 0
+              and ib2.rows_duplicated == ib1.rows_total and n1 == n2)
+    check("数据导入", f"导入 {os.path.basename(csvs[0])} 再重复导入一次（{db_path_note}）",
+          "首次写入并保留来源记录编号；重复导入不重复写入", passed,
+          f"首次写入 {ib1.rows_inserted} 条，重复导入写入 {ib2.rows_inserted} 条、"
+          f"跳过重复 {ib2.rows_duplicated} 条，记录数 {n1}->{n2}")
+
+
+def s_community():
+    """交流与排行榜：发帖/回帖/关闭；排行按 FCR 排序，数据不足不参与。"""
+    reset()
+    seed_env()
+    _, p = call("POST", "/api/community/posts", user="wang",
+                json={"title": "低温期投喂经验", "content": "水温低于 18℃ 时减半投喂，观察摄食再补。",
+                      "category": "经验交流", "pond_id": 1})
+    pid = p["data"]["id"]
+    _, r = call("POST", f"/api/community/posts/{pid}/replies", user="owner",
+                json={"content": "同感，另外建议开增氧机后再投。"})
+    _, lst = call("GET", "/api/community/posts", user="owner")
+    post_ok = any(x["id"] == pid and x["reply_count"] >= 1 for x in lst["data"])
+    # 排行榜：给 A01 两次称重 + 投喂，FCR 可算；A02 数据不足不参与
+    from datetime import datetime, timedelta
+    today = datetime.now()
+    for d, w in ((20, 150.0), (0, 240.0)):
+        call("POST", "/api/ponds/1/weigh", user="owner",
+             json={"avg_weight": w, "sample_count": 30,
+                   "weighed_at": (today - timedelta(days=d)).strftime("%Y-%m-%d %H:%M:%S")})
+    sg = fresh_suggestion(user="owner")
+    _, t = call("POST", "/api/ponds/1/tasks", user="owner",
+                json={"request_no": "REQ-LB-" + uuid.uuid4().hex[:8],
+                      "suggestion_code": sg["code"], "confirm_amount": 66.0,
+                      "change_reason": "排行场景固定投喂 66kg"})
+    call("POST", "/api/receipts", json={"task_no": t["data"]["task_no"], "kind": "finish",
+                                        "status": "done", "actual_amount": 66.0})
+    _, lb = call("GET", "/api/leaderboard?days=30", user="owner")
+    rows = lb.get("data") or []
+    ranked = [x for x in rows if x["rank"]]
+    a01 = next((x for x in rows if x["pond"]["code"] == "A01"), {})
+    a02 = next((x for x in rows if x["pond"]["code"] == "A02"), {})
+    lb_ok = (lb.get("ok") and ranked and ranked[0]["rank"] == 1
+             and a01.get("fcr") is not None
+             and a02.get("rank") is None and a02.get("not_ranked_reason"))
+    _, cl = call("POST", f"/api/community/posts/{pid}/close", user="wang", json={})
+    passed = post_ok and lb_ok and cl["data"]["status"] == "closed"
+    check("交流与排行榜", "发帖回帖并关闭；A01 两次称重+投喂，A02 不给称重，查询排行",
+          "交流帖可发布/回复/关闭；FCR 可算的塘参与排名，数据不足明确不参与", passed,
+          f"发帖回复关闭均成功={post_ok and cl['data']['status'] == 'closed'}；"
+          f"A01 FCR={a01.get('fcr')}（{a01.get('fcr_basis')}）；A02 未参与原因：{a02.get('not_ranked_reason')}")
 
 
 def main():
@@ -301,11 +581,17 @@ def main():
     for fn in (s_terminal_register, s_env_upload, s_data_invalid, s_day_features,
                s_temp_driven, s_normal_feed, s_duplicate_submit, s_receipt_timeout,
                s_review_recover, s_late_receipt, s_actual_unknown, s_stop_and_fault,
-               s_permission, s_model_interface):
+               s_permission, s_model_interface, s_fish_event, s_compare,
+               s_plan_ops, s_community, s_vision, s_data_import):
         try:
             fn()
         except Exception as e:
             check(fn.__name__, "-", "-", False, f"异常：{e}")
+        if fn in (s_vision, s_data_import):
+            try:
+                reset()
+            except Exception:
+                pass
     print("=" * 78)
     n_pass = sum(1 for r in RESULTS if r["结果"] == "通过")
     print(f"合计 {len(RESULTS)} 项，通过 {n_pass} 项，失败 {len(RESULTS)-n_pass} 项")

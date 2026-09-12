@@ -11,13 +11,14 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend"))
 
 from database import SessionLocal
-from models import (Alert, AuditLog, FeedingFeedback, FeedingTask, FishEvent,
-                    Measurement, Receipt, Review, Suggestion, WeighRecord)
+from models import (Alert, AuditLog, CommunityPost, FeedingFeedback, FeedingTask,
+                    FishEvent, Measurement, PostReply, Receipt, Review,
+                    Suggestion, WeighRecord)
 
 # 删除顺序必须满足外键约束：先删引用方，再删被引用方。
 # Receipt/Review/Alert/AuditLog 引用 FeedingTask；FeedingTask 引用 Suggestion。
-RUNTIME = [Receipt, Review, Alert, AuditLog, FeedingTask, Suggestion,
-           FeedingFeedback, FishEvent]
+RUNTIME = [PostReply, CommunityPost, Receipt, Review, Alert, AuditLog,
+           FeedingTask, Suggestion, FeedingFeedback, FishEvent]
 ALL = RUNTIME + [Measurement, WeighRecord]
 
 

@@ -53,6 +53,26 @@ def seed_env(db, pond_id, batch_id, terminal_id, days=30):
     return n
 
 
+def seed_recent_hours(db, pond_id, batch_id, terminal_id, hours=26):
+    """补一段最近逐小时样本（供水质趋势模型训练用，≥12 个小时桶）。"""
+    n = 0
+    for h in range(hours, -1, -1):
+        ts = (NOW - timedelta(hours=h)).replace(minute=0, second=0, microsecond=0)
+        if ts > NOW:
+            continue
+        for metric, base, amp, unit in (
+            ("temperature", 25.5, 1.6, "℃"),
+            ("oxygen", 6.6, 0.6, "mg/L"),
+        ):
+            val = round(base + amp * ((h % 12) / 12.0) + rng.uniform(-0.2, 0.2), 2)
+            db.add(Measurement(pond_id=pond_id, terminal_id=terminal_id,
+                               batch_id=batch_id, metric=metric, value=val,
+                               unit=unit, collected_at=ts, valid=True,
+                               source="sim"))
+            n += 1
+    return n
+
+
 def seed_tasks(db, pond_id, batch_id, terminal_id, device_id, user_id, count=8):
     """已完成任务 + 1 个待核查 + 1 条卡料失败。"""
     base = NOW - timedelta(days=count * 2 + 3)
@@ -151,9 +171,11 @@ def main():
 
         # 清掉旧的 sim 数据，避免叠加
         db.query(Measurement).filter_by(source="sim").delete()
+        db.query(WeighRecord).filter(WeighRecord.note == "定期抽样").delete(synchronize_session=False)
         db.commit()
 
         n_env = seed_env(db, pond.id, batch.id, term.id)
+        n_env += seed_recent_hours(db, pond.id, batch.id, term.id)
         seed_tasks(db, pond.id, batch.id, term.id, feeder.id, wang.id)
 
         # 摄食反馈

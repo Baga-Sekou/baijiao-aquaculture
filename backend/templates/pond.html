@@ -7,17 +7,25 @@
   <span id="batchPill" class="pill"></span>
 </div>
 
-<!-- 环境指标 -->
+<!-- 环境指标（仪表盘） -->
 <div id="envCards" class="grid c4"></div>
 
-<!-- 投喂：建议 → 人工确认 -->
-<div class="card span2" style="margin-top:14px">
-  <h2>投喂建议与确认</h2>
-  <div class="row" style="margin-bottom:10px">
-    <button class="btn" id="btnSuggest">生成投喂建议</button>
-    <span class="muted" id="suggestHint">系统提供建议，需人工确认后执行；建议量、确认量、实际量分别保存。</span>
+<div class="grid c2" style="margin-top:14px">
+  <!-- 今日运行 -->
+  <div class="card">
+    <h2>今日运行</h2>
+    <div class="grid c2" id="todayRings"></div>
+    <p class="muted" id="todayNote" style="margin-top:6px"></p>
   </div>
-  <div id="suggestBox"></div>
+  <!-- 投喂：建议 → 人工确认 -->
+  <div class="card">
+    <h2>投喂建议与确认</h2>
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn" id="btnSuggest">生成投喂建议</button>
+      <span class="muted" id="suggestHint">系统提供建议，需人工确认后执行；建议量、确认量、实际量分别保存。</span>
+    </div>
+    <div id="suggestBox"></div>
+  </div>
 </div>
 
 <!-- 趋势图 -->
@@ -30,11 +38,43 @@
   </div>
 </div>
 
+<!-- AI 模型预测 -->
+<div class="card" style="margin-top:14px">
+  <h2>AI 模型预测</h2>
+  <div class="row" style="margin-bottom:10px">
+    <select class="input" id="predictTarget" style="width:auto">
+      <option value="growth">生长预测</option>
+      <option value="feed">投喂量预测</option>
+      <option value="water_quality">水质预测</option>
+    </select>
+    <button class="btn" id="btnPredict">预测</button>
+    <button class="btn ghost" id="btnTrain">训练模型</button>
+    <button class="btn gray" id="btnModelStatus">模型状态</button>
+    <span class="muted">输出含目标、单位、时间范围与版本；数据不足时明确提示，不返回伪预测。</span>
+  </div>
+  <div id="predictBox"><div class="empty">选择目标后点击「预测」或先「训练模型」</div></div>
+</div>
+
 <!-- 监控画面 -->
 <div class="card" style="margin-top:14px">
   <h2>塘口监控</h2>
   <div class="grid c2" id="cams"></div>
-  <p class="muted" style="margin-top:8px">相机离线时明确提示“画面不可用”，不以旧截图表示正常监控。</p>
+  <div class="row" style="margin-top:10px">
+    <video id="camVideo" autoplay playsinline muted
+           style="width:320px;max-width:100%;border-radius:8px;background:#0b1f33;display:none"></video>
+    <canvas id="camCanvas" style="display:none"></canvas>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button class="btn" id="btnCamOpen">打开相机（本机摄像头）</button>
+    <button class="btn green" id="btnSnap" style="display:none">拍照并识别</button>
+    <input type="file" id="frameFile" accept="image/*" style="display:none">
+    <button class="btn ghost" id="btnUpload">上传图片识别</button>
+    <button class="btn ghost" id="btnOcr">图片文字识别（OCR）</button>
+  </div>
+  <p class="muted" style="margin-top:8px">
+    相机离线时明确提示「画面不可用」，不以旧截图表示正常监控；识别为水面漂浮物启发式算法（cv-float-v1），
+    结果需人工确认；OCR 需本机安装 tesseract，未安装时明确提示。
+  </p>
 </div>
 
 <!-- 投喂记录 -->
@@ -47,9 +87,8 @@
 <div class="card" style="margin-top:14px">
   <h2>疑似死鱼事件</h2>
   <div class="row" style="margin-bottom:8px">
-    <button class="btn ghost" id="btnDetect">调用识别接口（仿真）</button>
     <button class="btn gray" id="btnReport">登记疑似事件</button>
-    <span class="muted">识别结果作为待确认事件；人工确认前不计入已确认数量。</span>
+    <span class="muted">识别结果作为待确认事件；人工确认前不计入已确认数量。流程演示可用上传图片识别。</span>
   </div>
   <div id="eventTable"></div>
 </div>
@@ -65,18 +104,13 @@
 const POND = {{ pond_id }};
 let SUGGESTION = null;
 
-function metricCard(label, m, unitDefault) {
-  if (!m || !m.connected) {
-    return `<div class="card metric"><div class="k">${label}</div>
-      <div class="v">未接入</div><div class="s">暂无该指标设备</div></div>`;
-  }
-  const cls = m.expired ? 'warn' : '';
-  return `<div class="card metric ${cls}">
-    <div class="k">${label}</div>
-    <div class="v">${m.value}${esc(m.unit || unitDefault || '')}</div>
-    <div class="s">${m.expired ? '<span class="pill warn">已过期</span> ' : ''}${fmtTime(m.collected_at)} · 来源 ${esc(m.source)}</div>
-  </div>`;
-}
+// 各指标量程与适市区间（与系统配置口径一致，仅用于展示着色）
+const GAUGE_DEF = {
+  temperature: { label: '水温', min: 0, max: 40, ok: [24, 28], unit: '℃' },
+  oxygen: { label: '溶氧', min: 0, max: 20, ok: [5, 16], unit: 'mg/L' },
+  ph: { label: 'pH', min: 0, max: 14, ok: [6.5, 8.5], unit: '' },
+  orp: { label: 'ORP', min: 0, max: 500, ok: [200, 400], unit: 'mV' },
+};
 
 async function loadPond() {
   const r = await API.get(`/api/ponds/${POND}`);
@@ -90,9 +124,48 @@ async function loadEnv() {
   const r = await API.get(`/api/ponds/${POND}/env/latest`);
   if (!r.ok) return;
   const e = r.data;
-  $('#envCards').innerHTML =
-    metricCard('水温', e.temperature, '℃') + metricCard('溶氧', e.oxygen, ' mg/L') +
-    metricCard('pH', e.ph, '') + metricCard('ORP', e.orp, ' mV');
+  $('#envCards').innerHTML = Object.keys(GAUGE_DEF).map(k =>
+    `<div class="card gauge-wrap" id="gauge_${k}"></div>`).join('');
+  for (const k of Object.keys(GAUGE_DEF)) {
+    const def = GAUGE_DEF[k];
+    const m = e[k];
+    const expired = m && m.connected && m.expired;
+    gauge($(`#gauge_${k}`), {
+      label: def.label + (expired ? '（数据已过期）' : ''),
+      value: m && m.connected ? m.value : null,
+      unit: def.unit, min: def.min, max: def.max, ok: def.ok,
+    });
+  }
+}
+
+async function loadToday() {
+  const [d, charts] = await Promise.all([
+    API.get(`/api/ponds/${POND}/dashboard`),
+    API.get(`/api/ponds/${POND}/charts?days=7`),
+  ]);
+  if (!d.ok) return;
+  const today = d.data.today || {};
+  // 任务完成率：done / 今日全部任务
+  const tr = await API.get(`/api/ponds/${POND}/tasks`);
+  const todays = (tr.ok ? tr.data : []).filter(t => (t.approved_at || '').startsWith(new Date().toISOString().slice(0, 10)));
+  const doneN = todays.filter(t => t.status === 'done').length;
+  // 周均日投喂作为今日参考线
+  const byDay = {};
+  (charts.ok ? charts.data.feed : []).forEach(f => {
+    if (f.confirmed != null) byDay[f.t] = (byDay[f.t] || 0) + f.confirmed;
+  });
+  const days = Object.keys(byDay);
+  const avg7 = days.length ? Object.values(byDay).reduce((a, b) => a + b, 0) / days.length : 0;
+  $('#todayRings').innerHTML = `
+    <div class="card ring-box" id="ringTask" style="border:none;box-shadow:none"></div>
+    <div class="card ring-box" id="ringFeed" style="border:none;box-shadow:none"></div>`;
+  ring($('#ringTask'), { label: '今日任务完成', value: doneN, max: Math.max(todays.length, 1),
+    unit: ' 项', note: `今日共 ${todays.length} 个投喂任务` });
+  ring($('#ringFeed'), { label: '今日确认投喂 (kg)', value: today.confirmed_feed_kg || 0,
+    max: Math.max(Math.ceil(avg7 * 2) || 10, today.confirmed_feed_kg || 0), unit: ' kg',
+    color: '#2e75b6', note: days.length ? `近 ${days.length} 天日均 ${avg7.toFixed(1)} kg` : '暂无历史投喂' });
+  $('#todayNote').textContent =
+    `今日任务 ${today.tasks} 次，已确认投喂 ${today.confirmed_feed_kg} kg（按确认量累计；实际量未知单独标明）。`;
 }
 
 async function loadCharts() {
@@ -209,7 +282,7 @@ async function confirmSuggest() {
   if (!r.ok) { toast(r.message, 'err'); return; }
   toast(`任务 ${r.data.task_no} 已创建并下发（状态 ${statusCN(r.data.status)}）`, 'ok');
   SUGGESTION = null; $('#suggestBox').innerHTML = '';
-  setTimeout(() => { loadTasks(); loadPond(); }, 1200);
+  setTimeout(() => { loadTasks(); loadPond(); loadToday(); }, 1200);
 }
 
 async function loadEvents() {
@@ -264,20 +337,191 @@ async function closeAlert(id) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  loadPond(); loadEnv(); loadCharts(); loadCams(); loadTasks(); loadEvents(); loadAlerts();
+  loadPond(); loadEnv(); loadToday(); loadCharts(); loadCams(); loadTasks(); loadEvents(); loadAlerts();
   $('#btnSuggest').onclick = suggest;
-  $('#btnDetect').onclick = async () => {
-    const r = await API.post(`/api/ponds/${POND}/vision/detect`, { detected: true, confidence: 0.86 });
-    if (!r.ok) { toast(r.message, 'err'); return; }
-    toast(r.data.detected ? '识别到疑似对象，已生成待确认事件' : '未检测到疑似对象', 'ok');
-    loadEvents();
-  };
   $('#btnReport').onclick = async () => {
     const r = await API.post(`/api/ponds/${POND}/fish-events`, {
       position_desc: '水面西南角', observation: '巡塘时发现 2 尾疑似死鱼', source: 'manual',
     });
     if (!r.ok) { toast(r.message, 'err'); return; }
     toast('已登记疑似事件 ' + r.data.code, 'ok'); loadEvents();
+  };
+
+  // ---------------- AI 模型预测 ----------------
+  $('#btnPredict').onclick = async () => {
+    const t = $('#predictTarget').value;
+    const box = $('#predictBox');
+    box.innerHTML = '<div class="empty">预测中…</div>';
+    const r = await API.get(`/api/ponds/${POND}/model/predict?target=${t}`);
+    if (!r.ok) {
+      box.innerHTML = `<div class="reason" style="border-color:#e04b4b">
+        <b>未生成预测</b><br>${esc(r.message)}${r.reason ? `<br><span class="muted">原因：${esc(r.reason)}</span>` : ''}</div>`;
+      return;
+    }
+    const d = r.data;
+    let body = '';
+    if (d.target === 'growth') {
+      const pts = d.series.map(x => ({ v: x.weight_g, label: x.date + ' ' + x.weight_g + 'g' }));
+      const tgt = d.target_weight_g != null
+        ? [{ name: '目标体重', color: '#548235', points: pts.map(() => ({ v: d.target_weight_g })), dash: true }]
+        : [];
+      body = `<div class="grid c4" style="margin-bottom:10px">
+        <div class="card metric"><div class="k">当前估计体重</div><div class="v">${d.current_weight_g} g</div></div>
+        <div class="card metric"><div class="k">生长速度</div><div class="v">${d.daily_gain_g} g/天</div></div>
+        <div class="card metric"><div class="k">距目标(${d.target_weight_g ?? '—'}g)</div><div class="v">${d.days_to_target ?? '—'} 天</div></div>
+        <div class="card metric"><div class="k">预计达标日</div><div class="v" style="font-size:15px">${d.eta_date ?? '—'}</div></div>
+      </div>
+      <div id="growthChart"></div>`;
+      $('#predictBox').innerHTML = `<div class="reason">
+        <b>预测目标 ${esc(d.target)}</b>
+        <span class="pill">模型 ${esc(d.version)}</span>
+        <span class="pill">训练于 ${esc(d.trained_at)}</span>
+        <span class="pill warn">外推参考，非养殖依据</span>
+        <br><span class="muted">${esc(d.basis)}</span><br>
+        <span class="muted">${esc(d.note || '')}</span></div>
+        <div style="margin-top:10px">${body}</div>`;
+      lineChart($('#growthChart'), [
+        { name: '预测体重', color: '#C55A11', unit: 'g', dash: true, points: pts },
+        ...tgt,
+      ]);
+      return;
+    }
+    if (d.target === 'feed') {
+      body = `<div class="grid c4" style="margin-bottom:10px">
+        <div class="card metric"><div class="k">预测口径</div><div class="v">日投喂总量</div></div>
+        <div class="card metric"><div class="k">参考水温</div><div class="v">${d.temperature_basis_c} ℃</div></div>
+        <div class="card metric"><div class="k">模型误差 MAE</div><div class="v">${d.metrics.mae_kg} kg</div></div>
+        <div class="card metric"><div class="k">训练样本</div><div class="v">${d.metrics.n_samples} 天</div></div>
+      </div>
+      <div id="feedBars" style="margin-bottom:10px"></div>
+      <table><thead><tr><th>日期</th><th>预测投喂量</th><th>生物量</th></tr></thead><tbody>
+      ${d.series.map(x => `<tr><td>${esc(x.date)}</td><td><b>${x.amount_kg} kg</b></td><td>${x.biomass_kg} kg</td></tr>`).join('')}
+      </tbody></table>`;
+      $('#predictBox').innerHTML = `<div class="reason">
+        <b>预测目标 ${esc(d.target)}</b>
+        <span class="pill">模型 ${esc(d.version)}</span>
+        <span class="pill">训练于 ${esc(d.trained_at)}</span>
+        <span class="pill warn">外推参考，非养殖依据</span>
+        <br><span class="muted">${esc(d.basis)}</span><br>
+        <span class="muted">${esc(d.note || '')}</span></div>
+        <div style="margin-top:10px">${body}</div>`;
+      barChart($('#feedBars'),
+        d.series.map(x => ({ name: x.date.slice(5), value: x.amount_kg, unit: ' kg' })));
+      return;
+    }
+    // 水质：实测曲线 + 虚线预测续接
+    $('#predictBox').innerHTML = `<div class="reason">
+      <b>预测目标 ${esc(d.target)}</b>
+      <span class="pill">模型 ${esc(d.version)}</span>
+      <span class="pill">训练于 ${esc(d.trained_at)}</span>
+      <span class="pill warn">外推参考，非养殖依据</span>
+      <br><span class="muted">${esc(d.basis)}</span><br>
+      <span class="muted">${esc(d.note || '')}</span></div>
+      <div style="margin-top:10px">
+      ${d.series.map((s, i) => `<div style="margin-bottom:8px">
+        <h3 style="margin:4px 0">${s.metric === 'temperature' ? '水温' : '溶氧'}
+          <span class="muted">当前 ${s.current_value}${s.metric_unit} · 趋势 ${s.trend_per_hour}${s.metric_unit}/时</span></h3>
+        <div id="wqChart_${i}"></div>
+      </div>`).join('')}</div>`;
+    for (const [i, s] of d.series.entries()) {
+      const hist = await API.get(`/api/ponds/${POND}/env/history?metric=${s.metric}`);
+      const histPts = (hist.ok ? hist.data : []).slice(0, 24).reverse().map(m => ({
+        v: m.value, valid: m.valid, label: m.collected_at + ' ' + m.value + s.metric_unit }));
+      // 预测点补空值接到实测尾部，形成"实线→虚线"续接
+      const pad = Math.max(histPts.length - 1, 0);
+      lineChart($(`#wqChart_${i}`), [
+        { name: `实测${s.metric === 'temperature' ? '水温' : '溶氧'}`,
+          color: s.metric === 'temperature' ? '#C55A11' : '#2E75B6', unit: s.metric_unit, points: histPts },
+        { name: '预测', color: '#8a5cc6', unit: s.metric_unit, dash: true,
+          points: [...Array(pad).fill({ v: null }),
+                   ...s.points.map(x => ({ v: x.value, label: x.time + ' ' + x.value + s.metric_unit }))] },
+      ]);
+    }
+  };
+  $('#btnTrain').onclick = async () => {
+    const btn = $('#btnTrain'); btn.disabled = true; btn.textContent = '训练中…';
+    const r = await API.post(`/api/ponds/${POND}/model/train`, { target: 'all' });
+    btn.disabled = false; btn.textContent = '训练模型';
+    if (!r.ok) { toast(r.message, 'err'); return; }
+    const parts = ['growth', 'feed', 'water_quality'].map(t =>
+      `${({growth: '生长', feed: '投喂', water_quality: '水质'})[t]}：${r.data[t].ok ? '✓ ' + r.data[t].version : '✗ ' + r.data[t].message}`);
+    toast(parts.join('；'), r.data.growth.ok || r.data.feed.ok || r.data.water_quality.ok ? 'ok' : 'err');
+  };
+  $('#btnModelStatus').onclick = async () => {
+    const r = await API.get(`/api/ponds/${POND}/model/status`);
+    if (!r.ok) { toast(r.message, 'err'); return; }
+    $('#predictBox').innerHTML = `<table><thead><tr>
+      <th>目标</th><th>状态</th><th>版本</th><th>R²</th><th>样本数</th><th>训练时间</th>
+      </tr></thead><tbody>${r.data.map(m => `
+      <tr><td>${esc(m.target)}</td>
+      <td>${m.trained ? '<span class="pill ok">已训练</span>' : '<span class="pill warn">未训练</span>'}</td>
+      <td>${esc(m.version)}</td><td>${m.r2 ?? '—'}</td><td>${m.n_samples ?? '—'}</td>
+      <td class="muted">${esc(m.trained_at || '—')}</td></tr>`).join('')}</tbody></table>`;
+  };
+
+  // ---------------- 相机接入：本机摄像头拍照 / 上传图片 → 真实识别 ----------------
+  let stream = null;
+  async function sendFrame(blob, kind) {
+    const fd = new FormData();
+    fd.append('file', blob, kind === 'ocr' ? 'ocr.jpg' : 'frame.jpg');
+    fd.append('position', '水上');
+    const user = localStorage.getItem('bj_user') || 'owner';
+    const path = kind === 'ocr' ? `/api/ponds/${POND}/vision/ocr` : `/api/ponds/${POND}/vision/frame`;
+    const resp = await fetch(path, { method: 'POST', headers: { 'X-User': user }, body: fd });
+    return resp.json();
+  }
+  $('#btnCamOpen').onclick = async () => {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      const v = $('#camVideo'); v.srcObject = stream; v.style.display = 'block';
+      $('#btnSnap').style.display = '';
+      toast('相机已打开', 'ok');
+    } catch (e) {
+      toast('无法打开相机：' + e.message + '（可用「上传图片识别」代替）', 'err');
+    }
+  };
+  $('#btnSnap').onclick = async () => {
+    const v = $('#camVideo');
+    if (!stream || !v.videoWidth) { toast('相机未就绪', 'err'); return; }
+    const c = $('#camCanvas');
+    c.width = v.videoWidth; c.height = v.videoHeight;
+    c.getContext('2d').drawImage(v, 0, 0);
+    const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.9));
+    toast('分析中…');
+    const r = await sendFrame(blob, 'detect');
+    showVisionResult(r);
+  };
+  $('#btnUpload').onclick = () => $('#frameFile').click();
+  $('#frameFile').onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    toast('分析中…');
+    const r = await sendFrame(f, 'detect');
+    showVisionResult(r);
+    e.target.value = '';
+  };
+  function showVisionResult(r) {
+    const d = r.data || {};
+    if (!r.ok || d.ok === false) { toast(r.message || d.error || '识别失败', 'err'); return; }
+    const q = d.quality || {};
+    toast(`${d.suspected ? '检出疑似漂浮对象（置信度 ' + d.confidence + '），已生成待确认事件'
+      : '未检测到疑似漂浮对象'} · 画面质量：${q.note || '—'}`, d.suspected ? 'ok' : 'info');
+    loadEvents(); loadCams();
+  }
+  $('#btnOcr').onclick = () => {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = 'image/*';
+    inp.onchange = async () => {
+      if (!inp.files[0]) return;
+      toast('OCR 识别中…');
+      const r = await sendFrame(inp.files[0], 'ocr');
+      if (!r.ok) { toast(r.message || 'OCR 失败', 'err'); return; }
+      $('#predictBox').innerHTML = `<div class="reason"><b>OCR 识别结果</b>
+        <span class="muted">（图片 ${esc(r.data.image_path)}）</span>
+        <pre style="white-space:pre-wrap;margin:8px 0 0">${esc(r.data.text)}</pre></div>`;
+      toast('OCR 完成', 'ok');
+    };
+    inp.click();
   };
 });
 </script>

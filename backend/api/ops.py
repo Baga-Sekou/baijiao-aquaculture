@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 
 from flask import Blueprint, g, request
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from models import (Alert, AuditLog, Batch, CostRecord, FeedingTask, Measurement,
                     MedicineRecord, PlanTask, Pond, SysConfig, Terminal, User,
@@ -303,13 +303,19 @@ def feed_stats(pond_id):
     feed_today = feed_sum(t0)
     feed_window = feed_sum(since)
 
-    # 饲料系数：需有效增重（两次称重）
-    weighs = (g.db.query(WeighRecord).filter_by(pond_id=pond_id)
-              .order_by(WeighRecord.weighed_at).all())
+    # 饲料系数：需有效增重（两次称重）；只取本批次（含未归属批次但投苗之后），
+    # 避免把上一批（如 CSV 历史数据）的体重接进同一条增重曲线
+    batch = (g.db.query(Batch).filter_by(pond_id=pond_id, status="active")
+             .order_by(Batch.id.desc()).first())
+    weighs_q = (g.db.query(WeighRecord).filter_by(pond_id=pond_id))
+    if batch is not None:
+        weighs_q = weighs_q.filter(or_(WeighRecord.batch_id == batch.id,
+                                       WeighRecord.batch_id.is_(None)))
+        if batch.stock_date:
+            weighs_q = weighs_q.filter(WeighRecord.weighed_at >= batch.stock_date)
+    weighs = weighs_q.order_by(WeighRecord.weighed_at).all()
     fcr, fcr_note = None, None
     if len(weighs) >= 2:
-        batch = (g.db.query(Batch).filter_by(pond_id=pond_id, status="active")
-                 .order_by(Batch.id.desc()).first())
         n = batch.fish_number if batch and batch.fish_number else None
         first, last = weighs[0], weighs[-1]
         if n and first.avg_weight and last.avg_weight:

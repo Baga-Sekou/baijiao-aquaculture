@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}白蕉水产养殖管理平台{% endblock %}</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=2">
 </head>
 <body>
 <header class="topbar">
@@ -15,6 +15,7 @@
   <nav class="nav">
     <a href="/">鱼塘总览</a>
     <a href="/compare">多塘比较</a>
+    <a href="/community">交流·排行</a>
     <a href="/review">待核查</a>
     <a href="/alerts">异常</a>
   </nav>
@@ -33,7 +34,7 @@
   软件实训课程作业 · 智能渔业-3组 ·
   <span id="footNote">数据来源：人工 / 仿真 / 实测分别标识</span>
 </footer>
-<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=2"></script>
 {% block script %}{% endblock %}
 </body>
 </html>

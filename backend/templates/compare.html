@@ -11,7 +11,13 @@
   </select>
   <span class="muted">同一时间范围对照水质、告警频率、用药频率与饲料用量；数据条件不同的鱼塘不直接判定优劣。</span>
 </div>
-<div class="card"><div id="table"></div></div>
+<div class="grid c2" style="margin-top:14px">
+  <div class="card"><h2>投喂量对比</h2><div id="barFeed"></div></div>
+  <div class="card"><h2>平均水温对比</h2><div id="barTemp"></div></div>
+  <div class="card"><h2>平均溶氧对比</h2><div id="barOxy"></div></div>
+  <div class="card"><h2>告警次数对比</h2><div id="barAlert"></div></div>
+</div>
+<div class="card" style="margin-top:14px"><div id="table"></div></div>
 <div class="card" style="margin-top:14px">
   <h2>饲料统计与饲料系数（A01）</h2>
   <div id="feedStats"></div>
@@ -40,6 +46,16 @@ async function load() {
       <td class="muted">${x.stage_weight_g ? '均重 ' + x.stage_weight_g + 'g' : '—'}</td>
     </tr>`).join('')}</tbody></table>
     <p class="muted" style="margin-top:8px">${esc(r.data[0].sample_note)}</p>`;
+  barChart($('#barFeed'), r.data.map(x => ({ name: x.pond.name, value: x.feed_kg, unit: ' kg' })));
+  barChart($('#barTemp'), r.data.map(x => ({
+    name: x.pond.name, value: x.avg_temperature,
+    unit: ' ℃', color: 'linear-gradient(90deg,#C55A11,#e2a76f)' })));
+  barChart($('#barOxy'), r.data.map(x => ({
+    name: x.pond.name, value: x.avg_oxygen,
+    unit: ' mg/L', color: 'linear-gradient(90deg,#2E75B6,#7fb3d5)' })));
+  barChart($('#barAlert'), r.data.map(x => ({
+    name: x.pond.name, value: x.alerts, unit: ' 条',
+    color: 'linear-gradient(90deg,#C0392B,#e2948c)' })));
 
   const f = await API.get('/api/ponds/1/feed-stats?days=' + days);
   if (f.ok) {

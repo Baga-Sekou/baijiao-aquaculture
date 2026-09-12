@@ -1,0 +1,40 @@
+<view class="card">
+  <view class="title">{{name || '单塘看板'}}</view>
+  <view class="muted" wx:if="{{batch}}">批次 {{batch.code}} · {{batch.species}} · {{batch.fish_number}} 尾</view>
+</view>
+
+<view class="card" wx:if="{{env.length}}">
+  <view class="title">环境实况</view>
+  <view class="row" wx:for="{{env}}" wx:key="name" style="justify-content:space-between;margin:8rpx 0">
+    <text>{{item.name}}</text>
+    <text class="muted">{{item.value}}{{item.unit}} · {{item.time}}</text>
+  </view>
+</view>
+
+<view class="card">
+  <view class="title">投喂</view>
+  <view class="row">
+    <view class="btn grow" bindtap="suggest">生成投喂建议</view>
+    <view class="btn ghost grow" bindtap="predict">生长预测</view>
+  </view>
+  <view wx:if="{{suggestion}}" style="margin-top:16rpx">
+    <view class="pill">建议 {{suggestion.amount}}{{suggestion.unit}}</view>
+    <view class="pill">规则 {{suggestion.rule_version}}</view>
+    <view class="muted" style="margin:8rpx 0">{{suggestion.reason}}</view>
+    <view class="btn" bindtap="confirmTask">确认并下发</view>
+  </view>
+  <view wx:if="{{predict}}" style="margin-top:16rpx">
+    <view class="title">生长预测（{{predict.version}}）</view>
+    <view class="muted">当前估计 {{predict.current_weight_g}}g · 日增 {{predict.daily_gain_g}}g ·
+      距目标 {{predict.days_to_target || '—'}} 天</view>
+    <view class="muted">{{predict.note}}</view>
+  </view>
+</view>
+
+<view class="card" wx:if="{{tasks.length}}">
+  <view class="title">最近任务</view>
+  <view class="row" wx:for="{{tasks}}" wx:key="task_no" style="justify-content:space-between;margin:8rpx 0">
+    <text class="muted">{{item.task_no}}</text>
+    <text>{{item.status}}</text>
+  </view>
+</view>

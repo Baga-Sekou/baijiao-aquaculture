@@ -24,11 +24,15 @@ from api.env import bp as env_bp
 from api.feeding import bp as feeding_bp
 from api.monitor import bp as monitor_bp
 from api.ops import bp as ops_bp
+from api.model import bp as model_bp
+from api.community import bp as community_bp
 
 
 def create_app():
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config["JSON_AS_ASCII"] = False
+    # 局域网演示：静态资源不缓存，改完前端刷新即生效（不影响接口性能）
+    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
     CORS(app)
 
     @app.before_request
@@ -56,6 +60,8 @@ def create_app():
     app.register_blueprint(feeding_bp, url_prefix="/api")
     app.register_blueprint(monitor_bp, url_prefix="/api")
     app.register_blueprint(ops_bp, url_prefix="/api")
+    app.register_blueprint(model_bp, url_prefix="/api")
+    app.register_blueprint(community_bp, url_prefix="/api")
 
     # ---------------- 页面（Web 看板 / 移动端响应式） ----------------
     @app.route("/")
@@ -78,6 +84,10 @@ def create_app():
     def page_alerts():
         return render_template("alerts.html")
 
+    @app.route("/community")
+    def page_community():
+        return render_template("community.html")
+
     @app.route("/health")
     def health():
         return jsonify({"ok": True, "service": "baijiao-aquaculture", "version": "1.0"})
@@ -90,6 +100,8 @@ app = create_app()
 if __name__ == "__main__":
     host = os.getenv("APP_HOST", "127.0.0.1")
     port = int(os.getenv("APP_PORT", "5000"))
+    # 默认关闭 Flask 调试模式（生产要求）；本地开发设 APP_DEBUG=1 打开
+    debug = os.getenv("APP_DEBUG", "0") == "1"
     from database import IS_SQLITE, DB_URL
     kind = "SQLite" if IS_SQLITE else "MySQL"
     print("=" * 60)
@@ -98,7 +110,18 @@ if __name__ == "__main__":
     if IS_SQLITE:
         print(f"  数据库文件：{DB_URL.replace('sqlite:///', '')}")
     print(f"  访问地址：http://127.0.0.1:{port}")
+    print(f"  运行模式：{'开发调试（APP_DEBUG=1）' if debug else '常规（调试关闭）'}")
     if host == "0.0.0.0":
         print("  （已监听 0.0.0.0，同一 WiFi 下手机可用本机局域网 IP 访问）")
     print("=" * 60)
-    app.run(host=host, port=port, debug=True, use_reloader=False)
+    if debug:
+        app.run(host=host, port=port, debug=True, use_reloader=False)
+    else:
+        try:
+            # 常规模式使用生产级 WSGI 服务器（多线程，可并发）
+            from waitress import serve
+            serve(app, host=host, port=port, threads=8)
+        except ImportError:
+            print("  [提示] 未安装 waitress（pip install waitress），"
+                  "临时回退到 Flask 开发服务器（仅限本机演示）")
+            app.run(host=host, port=port, debug=False, use_reloader=False)

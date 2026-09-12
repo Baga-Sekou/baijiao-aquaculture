@@ -1,0 +1,29 @@
+<view class="card">
+  <view class="title">养殖排行榜（近 30 天）</view>
+  <view wx:for="{{board}}" wx:key="{{index}}" style="margin:10rpx 0">
+    <text class="pill">{{item.rank ? '第' + item.rank + '名' : '未参与'}}</text>
+    <text>{{item.pond.name}}</text>
+    <text class="muted" wx:if="{{item.fcr}}"> FCR {{item.fcr}}</text>
+    <view class="muted" wx:if="{{item.not_ranked_reason}}">{{item.not_ranked_reason}}</view>
+  </view>
+</view>
+
+<view class="card">
+  <view class="title">发布交流</view>
+  <input class="input" placeholder="标题" value="{{title}}" bindinput="onInputTitle" />
+  <textarea class="input" placeholder="分享经验或提问" value="{{content}}"
+    bindinput="onInputContent" style="margin-top:12rpx;width:auto;height:140rpx" />
+  <picker range="{{cats}}" value="{{catIndex}}" onchange="onCatChange" bindchange="onCatChange">
+    <view class="pill" style="margin-top:12rpx">{{cats[catIndex]}} ▾</view>
+  </picker>
+  <view class="btn" style="margin-top:16rpx" bindtap="publish">发布</view>
+</view>
+
+<view class="card">
+  <view class="title">最新帖子</view>
+  <view wx:for="{{posts}}" wx:key="id" style="margin:10rpx 0">
+    <text>{{item.title}}</text>
+    <text class="pill" style="margin-left:8rpx">{{item.category}}</text>
+    <view class="muted">{{item.author.name}} · 回复 {{item.reply_count}}</view>
+  </view>
+</view>
