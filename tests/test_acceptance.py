@@ -1,21 +1,41 @@
 """验收场景测试（对应需求说明书第 9 章验收要求）。
 
 以完整业务场景为单位，逐条给出检查方法、预期结果与实际结果。
-运行前需先启动后端；本脚本自行拉起/复位运行数据。
+
+隔离设计：默认在临时目录建一个**专用测试数据库**并拉起独立后端实例
+（端口 5057），全程不触碰演示库 data/baijiao.db；跑完自动清理。
+如需对已启动的服务做实测，用 --base 指定地址（此时会清空该服务的数据）。
 
 用法：
-    python tests/test_acceptance.py
+    python tests/test_acceptance.py                 # 隔离模式（推荐）
+    python tests/test_acceptance.py --base http://127.0.0.1:5000
 """
+import argparse
 import glob
 import json
 import os
+import shutil
+import socket
+import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
 import requests
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# 部分场景需要直接向库里播种数据（如模型训练样本、FCR 称重记录），
+# 它们在主进程中 import database/models，故需把 backend 加入模块搜索路径。
+# 隔离模式下 DB_URL 会被指向测试库，这些直连同样作用于测试库。
+sys.path.insert(0, os.path.join(ROOT, "backend"))
+
+# 由 main() 填充：隔离模式下指向临时服务
 BASE = os.getenv("API_BASE", "http://127.0.0.1:5000")
+TEST_DB = None          # 隔离模式下的测试库路径
+_HARNESS = {}           # 保存子进程/临时目录，供清理
+
 H = {"X-User": "wang"}          # 王师傅：A01 可控制 + 可核查
 H_OWNER = {"X-User": "owner"}
 H_NOCONTROL = {"X-User": "liu"}  # 刘师傅：只有 A02，且不可核查
@@ -45,12 +65,37 @@ def check(name, method_desc, expected, passed, actual):
 def reset():
     """复位运行数据与测量数据，保证场景之间互不干扰。
 
-    会清空已导入的 CSV 测量；测试前如需保留，请重新运行 scripts/import_csv.py。
+    隔离模式下用子进程指向**测试库**执行复位，绝不触碰演示库；
+    实测模式（--base）下按本机 DB 配置复位，即清空该服务的数据。
     """
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
-    import reset_runtime
-    sys.argv = ["reset_runtime", "--all"]
-    reset_runtime.main()
+    env = dict(os.environ)
+    db_url = _HARNESS.get("db_url")
+    if db_url:
+        env["DB_URL"] = db_url
+    subprocess.run([sys.executable, os.path.join("scripts", "reset_runtime.py"), "--all"],
+                   cwd=ROOT, env=env, check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def trigger_timeout(tn, timeout_sec=0, tries=12):
+    """把超时阈值调到指定值并轮询巡检，直到目标任务转入待核查。
+
+    不使用固定 sleep：环境慢时固定等待会偶发失败。最多重试 tries 次。
+    返回 (最后一次巡检响应, 任务详情)。
+    """
+    call("PUT", "/api/config/task_timeout_sec", user="owner",
+         json={"value": str(timeout_sec)})
+    c = d = None
+    try:
+        for _ in range(tries):
+            time.sleep(0.5)
+            _, c = call("POST", "/api/tasks/check-timeouts")
+            _, d = call("GET", f"/api/tasks/{tn}", user="owner")
+            if (d.get("data") or {}).get("status") == "unknown":
+                break
+    finally:
+        call("PUT", "/api/config/task_timeout_sec", user="owner", json={"value": "120"})
+    return c, d
 
 
 def fresh_suggestion(pond=1, user="wang"):
@@ -187,18 +232,13 @@ def s_duplicate_submit():
 
 def s_receipt_timeout():
     reset(); tn = make_task("REQ-TO")
-    # 不发送回执；把超时阈值降为 0 并等过 1 秒余量后触发巡检
-    call("PUT", "/api/config/task_timeout_sec", user="owner", json={"value": "0"})
-    time.sleep(1.4)
-    call("POST", "/api/tasks/check-timeouts")
-    call("PUT", "/api/config/task_timeout_sec", user="owner", json={"value": "120"})
-    _, d = call("GET", f"/api/tasks/{tn}", user="owner")
+    # 不发送回执；降低阈值并轮询巡检，直到转入待核查
+    _, d = trigger_timeout(tn)
     td = d["data"]
     passed = td["status"] == "unknown" and td["device_locked"] is True
     check("回执超时", "任务下发后中断回执",
           "显示待核查及原因，不自动再次投料", passed,
           f"状态={td['status']}，设备占用={td['device_locked']}（未自动重发）")
-
 
 def s_review_recover():
     # 承接上一个场景：任务处于 unknown
@@ -220,10 +260,7 @@ def s_review_recover():
 
 def s_late_receipt():
     reset(); tn = make_task("REQ-LATE")
-    call("PUT", "/api/config/task_timeout_sec", user="owner", json={"value": "0"})
-    time.sleep(1.4)
-    call("POST", "/api/tasks/check-timeouts")
-    call("PUT", "/api/config/task_timeout_sec", user="owner", json={"value": "120"})
+    trigger_timeout(tn)
     # 核查判为未执行
     call("POST", f"/api/tasks/{tn}/review", user="owner", json={
         "conclusion": "not_executed", "basis": "现场确认",
@@ -387,6 +424,20 @@ def s_fish_event():
     check("死鱼事件", "登记两条疑似事件，分别确认-处理与标记误报",
           "识别/登记结果为待确认事件，确认与处理留痕", passed,
           f"事件1 {by[c1]['status']}，事件2 {by[c2]['status']}（确认前均不计入已确认数量）")
+
+    # 回归：误报与已处理为终态，不得互相改写而丢失分类
+    s3, r3 = call("POST", f"/api/fish-events/{c2}/handle", user="wang",
+                  json={"action": "process", "note": "改判"})
+    s4, r4 = call("POST", f"/api/fish-events/{c1}/handle", user="wang",
+                  json={"action": "false_alarm", "note": "改判"})
+    _, lst2 = call("GET", "/api/ponds/1/fish-events", user="wang")
+    by2 = {x["code"]: x for x in lst2["data"]}
+    ok2 = (s3 >= 400 and s4 >= 400
+           and by2[c2]["status"] == "false_alarm" and by2[c1]["status"] == "handled")
+    check("事件终态保护", "把误报改为已处理、把已处理改为误报",
+          "终态不接受改写，误报分类不丢失", ok2,
+          f"误报→已处理 HTTP {s3}、已处理→误报 HTTP {s4}；"
+          f"状态保持 {by2[c2]['status']} / {by2[c1]['status']}")
 
 
 def s_compare():
@@ -605,17 +656,13 @@ def s_running_timeout():
     tn = make_task("REQ-RT")
     call("POST", "/api/receipts", json={"task_no": tn, "kind": "accept",
                                         "status": "accepted"})
-    call("PUT", "/api/config/task_timeout_sec", user="owner", json={"value": "0"})
-    time.sleep(1.4)
-    _, c = call("POST", "/api/tasks/check-timeouts")
-    call("PUT", "/api/config/task_timeout_sec", user="owner", json={"value": "120"})
-    _, d = call("GET", f"/api/tasks/{tn}", user="owner")
+    c, d = trigger_timeout(tn)
     td = d["data"]
     passed = td["status"] == "unknown" and td["device_locked"] is True
     check("执行中超时", "终端 accept 后失联，触发超时巡检",
           "running 阶段超时同样转待核查并保留设备占用，不自动重发", passed,
           f"状态={td['status']}，占用={td['device_locked']}，"
-          f"巡检 timed_out={c['data']['timed_out']}")
+          f"巡检 timed_out={(c or {}).get('data', {}).get('timed_out')}")
 
 
 def s_out_of_order_receipt():
@@ -744,32 +791,148 @@ def s_concurrent_suggestions():
 
 
 
+def _free_port(preferred):
+    """优先用指定端口，被占用时让系统分配一个空闲端口。"""
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", preferred))
+        s.close()
+        return preferred
+    except OSError:
+        s.close()
+        s2 = socket.socket()
+        s2.bind(("127.0.0.1", 0))
+        p = s2.getsockname()[1]
+        s2.close()
+        return p
+
+
+def _wait_health(base, timeout=40):
+    """等待后端 /health 就绪。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            r = requests.get(base + "/health", timeout=2)
+            if r.ok:
+                return True
+        except requests.RequestException:
+            pass
+        time.sleep(0.5)
+    return False
+
+
+def start_isolated_server():
+    """在临时目录建专用测试库并拉起独立后端，返回 base 地址。
+
+    不触碰项目内的演示库 data/baijiao.db。
+    """
+    tmpdir = tempfile.mkdtemp(prefix="bj_accept_")
+    db_path = os.path.join(tmpdir, "test.db")
+    port = _free_port(5057)
+    base = f"http://127.0.0.1:{port}"
+
+    env = dict(os.environ)
+    env["DB_URL"] = "sqlite:///" + db_path.replace("\\", "/")
+    env["APP_PORT"] = str(port)
+    env["APP_HOST"] = "127.0.0.1"
+    env["APP_DEBUG"] = "0"
+    env["PYTHONIOENCODING"] = "utf-8"
+
+    # 建表 + 基础数据（直接对测试库操作，与演示库完全隔离）
+    subprocess.run([sys.executable, os.path.join("scripts", "init_db.py"), "--seed", "--quiet"],
+                   cwd=ROOT, env=env, check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    log = open(os.path.join(tmpdir, "server.log"), "w", encoding="utf-8")
+    proc = subprocess.Popen([sys.executable, os.path.join("backend", "app.py")],
+                            cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+
+    if not _wait_health(base):
+        proc.terminate()
+        log.close()
+        raise SystemExit(f"[错误] 测试后端未能启动，日志见 {tmpdir}/server.log")
+
+    _HARNESS["proc"] = proc
+    _HARNESS["tmpdir"] = tmpdir
+    _HARNESS["log"] = log
+    _HARNESS["db_url"] = env["DB_URL"]
+    # 让父进程内的直连（部分场景需直接播种数据）也指向测试库，
+    # 否则会误连演示库。database.py 用 load_dotenv(override=False)，
+    # 已存在的环境变量优先，因此这里设置的值会生效。
+    _HARNESS["old_db_url"] = os.environ.get("DB_URL")
+    os.environ["DB_URL"] = env["DB_URL"]
+    return base, db_path
+
+
+def stop_isolated_server():
+    proc = _HARNESS.get("proc")
+    if proc and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    if _HARNESS.get("log"):
+        _HARNESS["log"].close()
+    tmp = _HARNESS.get("tmpdir")
+    if tmp and os.path.isdir(tmp):
+        shutil.rmtree(tmp, ignore_errors=True)
+    # 还原父进程的 DB_URL，避免影响同一进程内的后续操作
+    if "old_db_url" in _HARNESS:
+        if _HARNESS["old_db_url"] is None:
+            os.environ.pop("DB_URL", None)
+        else:
+            os.environ["DB_URL"] = _HARNESS["old_db_url"]
+
+
 def main():
+    global BASE, TEST_DB
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--base", help="对已启动的服务做测试（会清空该服务的数据）")
+    args = ap.parse_args()
+
     print("=" * 78)
     print("白蕉水产养殖管理平台 · 验收场景测试")
     print("=" * 78)
-    reset()
-    for fn in (s_terminal_register, s_env_upload, s_data_invalid, s_day_features,
-               s_temp_driven, s_normal_feed, s_duplicate_submit, s_receipt_timeout,
-               s_review_recover, s_late_receipt, s_actual_unknown, s_stop_and_fault,
-               s_permission, s_auth_binding, s_running_timeout, s_out_of_order_receipt,
-               s_cancel_suggestion, s_input_validation, s_model_interface,
-               s_fish_event, s_compare, s_plan_ops, s_fcr_consistency,
-               s_community, s_concurrent_suggestions, s_vision, s_data_import):
-        try:
-            fn()
-        except Exception as e:
-            check(fn.__name__, "-", "-", False, f"异常：{e}")
-        if fn in (s_vision, s_data_import):
+
+    isolated = not args.base
+    if isolated:
+        print("隔离模式：使用临时测试库，不影响演示库 data/baijiao.db")
+        BASE, TEST_DB = start_isolated_server()
+        print(f"测试后端：{BASE}   测试库：{TEST_DB}")
+    else:
+        BASE = args.base.rstrip("/")
+        print(f"实测模式：{BASE}（注意：会清空该服务的数据）")
+    print("-" * 78)
+
+    try:
+        reset()
+        for fn in (s_terminal_register, s_env_upload, s_data_invalid, s_day_features,
+                   s_temp_driven, s_normal_feed, s_duplicate_submit, s_receipt_timeout,
+                   s_review_recover, s_late_receipt, s_actual_unknown, s_stop_and_fault,
+                   s_permission, s_auth_binding, s_running_timeout, s_out_of_order_receipt,
+                   s_cancel_suggestion, s_input_validation, s_model_interface,
+                   s_fish_event, s_compare, s_plan_ops, s_fcr_consistency,
+                   s_community, s_concurrent_suggestions, s_vision, s_data_import):
             try:
-                reset()
-            except Exception:
-                pass
+                fn()
+            except Exception as e:
+                check(fn.__name__, "-", "-", False, f"异常：{e}")
+            if fn in (s_vision, s_data_import):
+                try:
+                    reset()
+                except Exception:
+                    pass
+    finally:
+        if isolated:
+            stop_isolated_server()
+
     print("=" * 78)
     n_pass = sum(1 for r in RESULTS if r["结果"] == "通过")
     print(f"合计 {len(RESULTS)} 项，通过 {n_pass} 项，失败 {len(RESULTS)-n_pass} 项")
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs",
-                       "验收测试记录.json")
+    if isolated:
+        print("演示库未被修改（测试使用临时库，已清理）")
+    out = os.path.join(ROOT, "docs", "验收测试记录.json")
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(RESULTS, fh, ensure_ascii=False, indent=2)
     print("测试记录已写入 docs/验收测试记录.json")
@@ -777,4 +940,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        stop_isolated_server()
+        raise

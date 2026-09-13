@@ -99,6 +99,15 @@ python scripts/seed_demo.py        # 生成近 30 天环境曲线、若干投喂
 python tests/test_acceptance.py    # 跑第 9 章验收场景，输出 docs/验收测试记录.json
 ```
 
+**验收脚本默认使用隔离模式**：在临时目录建专用测试库并拉起独立后端（端口 5057），
+全程不触碰演示库 `data/baijiao.db`，跑完自动清理。因此可以随时跑验收而不丢演示数据。
+
+如需对已启动的服务实测（会清空该服务的数据）：
+
+```bash
+python tests/test_acceptance.py --base http://127.0.0.1:5000
+```
+
 ### 1.9 性能基准（需求书 8.4）
 
 ```bash
@@ -162,7 +171,7 @@ python scripts/benchmark.py --rows 200    # 需后端已启动；输出 docs/性
 │   ├── seed_demo.py              生成演示数据
 │   ├── benchmark.py              性能基准（记录数/采样吞吐/查询耗时，8.4）
 │   └── reset_runtime.py          重置运行数据
-├── tests/test_acceptance.py      验收场景测试（含模型/识别/导入/交流等 20 项）
+├── tests/test_acceptance.py      验收场景测试（隔离模式，28 项，不影响演示库）
 └── docs/
     ├── 设计说明.md               分层设计、状态机、异常策略
     ├── 验收测试记录.md/.json     验收场景实际结果

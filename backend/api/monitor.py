@@ -88,6 +88,15 @@ def handle_event(code):
         return fail("无权访问该事件", 403)
     body = request.get_json(silent=True) or {}
     action = body.get("action")          # confirm / process / false_alarm
+    if action not in ("confirm", "process", "false_alarm"):
+        return fail("action 必须是 confirm/process/false_alarm")
+
+    # 终态：误报与已处理不再接受状态转换，避免丢失「误报」分类
+    if ev.status == "false_alarm" and action != "false_alarm":
+        return fail("该事件已标记为误报，不能再改为其他状态", 409)
+    if ev.status == "handled" and action != "process":
+        return fail("该事件已处理完毕，不能再改为其他状态", 409)
+
     if action == "confirm":
         ev.status = "processing"
         ev.confirmed_by = g.user.id
@@ -98,10 +107,8 @@ def handle_event(code):
     elif action == "false_alarm":
         ev.status = "false_alarm"
         ev.handler_note = body.get("note", "误报")
-    else:
-        return fail("action 必须是 confirm/process/false_alarm")
     audit(g.db, "control", f"fish_event_{action}", pond_id=ev.pond_id,
-          user_id=g.user.id, detail={"code": ev.code})
+          user_id=g.user.id, detail={"code": ev.code, "from": ev.status})
     g.db.commit()
     return ok(row(ev, ["id", "code", "status", "confirmed_at", "handler_note"]))
 

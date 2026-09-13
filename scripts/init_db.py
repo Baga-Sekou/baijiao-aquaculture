@@ -20,7 +20,11 @@ load_dotenv(os.path.join(ROOT, ".env"), override=False)
 
 
 def create_database():
-    """MySQL 需要先建库；SQLite 首次连接即自动创建文件。"""
+    """MySQL 需要先建库；SQLite 首次连接即自动创建文件。
+
+    连接参数以 database 模块解析出的 DB_URL 为准（而非单独读 DB_* 变量），
+    这样用户在 .env 里只写一行 DB_URL 也能正确建库。
+    """
     from database import DB_URL, IS_SQLITE
 
     if IS_SQLITE:
@@ -28,13 +32,17 @@ def create_database():
         return
 
     import pymysql
-    user = os.getenv("DB_USER", "root")
-    password = os.getenv("DB_PASSWORD", "")
-    host = os.getenv("DB_HOST", "127.0.0.1")
-    port = int(os.getenv("DB_PORT", "3306"))
-    name = os.getenv("DB_NAME", "baijiao_aquaculture")
-    conn = pymysql.connect(host=host, port=port, user=user,
-                           password=password, charset="utf8mb4")
+    from sqlalchemy.engine import make_url
+
+    url = make_url(DB_URL)
+    name = url.database
+    if not name:
+        raise SystemExit("[错误] DB_URL 中缺少数据库名，例如 .../@127.0.0.1:3306/baijiao_aquaculture")
+    conn = pymysql.connect(host=url.host or "127.0.0.1",
+                           port=url.port or 3306,
+                           user=url.username,
+                           password=url.password or "",
+                           charset="utf8mb4")
     try:
         with conn.cursor() as cur:
             cur.execute(
