@@ -1,16 +1,17 @@
 // 全局配置与请求封装
-// 使用前把 BASE_URL 改成电脑局域网 IP（手机与电脑需在同一 WiFi）
-const BASE_URL = 'http://172.33.13.39:5000';
+// 开发者工具默认连接本机；真机调试需改为电脑局域网 IP（同一 WiFi）。
+// 可在开发者工具控制台设置 wx.setStorageSync('bj_api_base', 'http://127.0.0.1:5067')。
+const BASE_URL = 'http://127.0.0.1:5000';
 const USER_KEY = 'bj_user';
 
-function request(method, path, data) {
+function request(method, path, data, timeout = 10000) {
   return new Promise((resolve, reject) => {
     wx.request({
-      url: BASE_URL + path,
+      url: (wx.getStorageSync('bj_api_base') || BASE_URL).replace(/\/$/, '') + path,
       method,
       data,
       header: { 'X-User': wx.getStorageSync(USER_KEY) || 'owner' },
-      timeout: 10000,
+      timeout,
       success(res) {
         const d = res.data || {};
         if (d.ok) resolve(d);
@@ -24,5 +25,5 @@ function request(method, path, data) {
 module.exports = {
   BASE_URL, USER_KEY,
   get: (p) => request('GET', p),
-  post: (p, d) => request('POST', p, d || {}),
+  post: (p, d, timeout) => request('POST', p, d || {}, timeout),
 };

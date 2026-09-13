@@ -20,8 +20,9 @@
   <div class="card">
     <h2 id="feeding">投喂建议与确认</h2>
     <div class="row" style="margin-bottom:10px">
-      <button class="btn" id="btnSuggest">生成投喂建议</button>
-      <span class="muted" id="suggestHint">系统提供建议，需人工确认后执行；建议量、确认量、实际量分别保存。</span>
+      <button class="btn" id="btnSuggest">大模型生成建议</button>
+      <button class="btn gray" id="btnRuleSuggest">规则建议（不调用大模型）</button>
+      <span class="muted" id="suggestHint">大模型读取环境摘要给出建议，仍需人工确认；失败时不自动改用规则。</span>
     </div>
     <div id="suggestBox"><div class="suggest-empty"><span class="suggest-step">01</span><b>先查看环境，再决定投喂</b><p>生成建议后，可核对数量、填写调整原因，再确认下发。</p><div class="flow-labels">环境数据 <span>→</span> 生成建议 <span>→</span> 人工确认</div></div></div>
   </div>
@@ -297,8 +298,8 @@ function renderSuggestion(sg) {
   $('#suggestBox').innerHTML = `
     <div class="reason">
       <b>建议 ${esc(sg.code)}</b>：<b style="font-size:16px">${sg.amount} ${esc(sg.unit)}</b>
-      <span class="pill">规则 ${esc(sg.rule_version)}</span>
-      <span class="pill warn">演示规则</span><br>
+      <span class="pill">${sg.source === 'llm' ? '硅基流动 · ' + esc(sg.model) : '规则建议 · ' + esc(sg.rule_version)}</span>
+      <span class="pill warn">课程演示 · 人工核实</span><br>
       有效至 ${esc(sg.valid_until)}<br>
       <span class="muted">${esc(sg.reason)}</span>
     </div>
@@ -322,17 +323,21 @@ function renderSuggestion(sg) {
   };
 }
 
-async function suggest() {
+async function suggest(mode = 'llm') {
+  SUGGESTION = null;
+  $('#suggestBox').textContent = mode === 'llm' ? '正在请求硅基流动大模型，请稍候…' : '正在生成规则建议…';
+  $('#btnRuleSuggest').disabled = true;
   const btn = $('#btnSuggest'); btn.disabled = true; btn.textContent = '生成中…';
   try {
-    await suggestInner(btn);
+    await suggestInner(mode);
   } finally {
-    btn.disabled = false; btn.textContent = '生成投喂建议';
+    btn.disabled = false; btn.textContent = '大模型生成建议';
+    $('#btnRuleSuggest').disabled = false;
   }
 }
 
-async function suggestInner() {
-  const r = await API.post(`/api/ponds/${POND}/suggestions`, {});
+async function suggestInner(mode) {
+  const r = await API.post(`/api/ponds/${POND}/suggestions`, { mode });
   if (!r.ok) {
     $('#suggestBox').innerHTML = `<div class="reason" style="border-color:#e04b4b">
       <b>未生成有效建议</b><br>${esc(r.message)}</div>`;
@@ -411,7 +416,8 @@ async function closeAlert(id) {
 document.addEventListener('DOMContentLoaded', () => {
   loadPond(); loadEnv(); loadToday(); loadCharts(); loadCams(); loadTasks(); loadEvents(); loadAlerts();
   $('#stopForm').onsubmit = submitStop;
-  $('#btnSuggest').onclick = suggest;
+  $('#btnSuggest').onclick = () => suggest('llm');
+  $('#btnRuleSuggest').onclick = () => suggest('rule');
   // 任务状态会由终端/仿真器异步改变，定时刷新让状态变化自动可见
   // （此前只在初始加载与提交建议后刷新，任务会一直停在「已下发待回执」）
   setInterval(() => loadTasks(true), 5000);

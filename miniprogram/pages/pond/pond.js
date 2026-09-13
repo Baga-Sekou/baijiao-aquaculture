@@ -29,11 +29,19 @@ Page({
       this.setData({ tasks: (data || []).slice(0, 10) });
     }).catch(() => {});
   },
-  suggest() {
-    api.post(`/api/ponds/${this.data.id}/suggestions`).then(({ data }) => {
+  suggest(event) {
+    if (this.data.suggesting) return;
+    const mode = event.currentTarget.dataset.mode || 'llm';
+    this.setData({ suggesting: true, suggestion: null, suggestError: '' });
+    wx.showLoading({ title: mode === 'llm' ? '大模型生成中…' : '规则计算中…' });
+    api.post(`/api/ponds/${this.data.id}/suggestions`, { mode }, 45000).then(({ data }) => {
       this.setData({ suggestion: data });
-      wx.showToast({ title: '已生成建议 ' + data.amount + data.unit, icon: 'none' });
-    }).catch((e) => wx.showToast({ title: e.message || '生成失败', icon: 'none' }));
+    }).catch((e) => {
+      this.setData({ suggestError: e.message || '生成失败' });
+    }).finally(() => {
+      this.setData({ suggesting: false });
+      wx.hideLoading();
+    });
   },
   confirmTask() {
     const sg = this.data.suggestion;

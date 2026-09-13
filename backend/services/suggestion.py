@@ -15,6 +15,7 @@ from models import Batch, FeedingFeedback, FeedingTask, Suggestion
 from services.common import (audit, cfg, cfg_float, commit_with_code_retry,
                              next_code, now, weight_series)
 from services import environment as env
+from services import llm_feeding
 
 RULE_VERSION_FALLBACK = "rule-v1.0-demo"
 
@@ -40,16 +41,68 @@ def _feeder_for(db, pond_id):
     return db.query(Device).filter_by(pond_id=pond_id, kind="feeder").first()
 
 
-def generate(db, pond_id, batch_id=None, day=None, requested_by=None):
+def generate(db, pond_id, batch_id=None, day=None, requested_by=None, mode="rule"):
     """生成一条建议。返回 (suggestion, error_message)。
 
     口径：全塘单次投喂量(kg) = 鱼重(g) × 投魂数量 / 1000 × 比例 × 系数；
     编号唯一冲突（并发）时回退重新生成再提交。
     """
+    if mode not in ("rule", "llm"):
+        return None, "建议模式必须为 rule 或 llm"
+    cached_llm = None
+    cached_context = None
     for attempt in range(4):
         sg, err = _build(db, pond_id, batch_id, day, requested_by)
         if err:
             return None, err
+        if mode == "llm":
+            inputs = json.loads(sg.inputs_json)
+            # Only necessary measurement summaries are sent; no names, ids or logs.
+            context = {k: inputs[k] for k in (
+                "temperature", "day_features", "feedback_state", "fish_weight_g",
+                "fish_number", "biomass_kg")}
+            context["data_use"] = "课程演示，不作为真实养殖依据"
+            context["rule_reference_kg"] = sg.amount
+            context["environment"] = {}
+            for metric in ("temperature", "oxygen", "ph"):
+                m = env.latest(db, pond_id, metric)
+                context["environment"][metric] = (
+                    {"value": m.value, "unit": m.unit, "source": m.source,
+                     "collected_at": str(m.collected_at)}
+                    if m and not env.is_expired(db, m) else None)
+            minimum = cfg_float(db, "min_feed_per_task", 0.1)
+            maximum = min(sg.amount, cfg_float(db, "max_feed_per_task", 1200))
+            try:
+                if cached_llm is None:
+                    cached_llm = llm_feeding.recommend(context, minimum, maximum)
+                    cached_context = context
+                elif cached_context != context:
+                    db.rollback()
+                    return None, "生成期间输入已变化，请重新生成建议"
+            except llm_feeding.AdviceError as exc:
+                db.rollback()
+                return None, str(exc)
+            result = cached_llm
+            if result["decision"] == "hold":
+                db.rollback()
+                return None, "大模型建议暂缓投喂：" + result["reason"]
+            temp_time = datetime_from_snapshot(inputs["temperature"]["collected_at"])
+            if (now() - temp_time > timedelta(minutes=cfg_float(db, "measurement_expire_min", 180))
+                    or sg.valid_until < now()):
+                db.rollback()
+                return None, "生成期间输入或建议已过期，请更新数据后重试"
+            inputs["rule_reference"] = {"amount": sg.amount, "version": sg.rule_version,
+                                        "reason": sg.reason}
+            inputs["llm"] = result
+            inputs["llm_context"] = context
+            sg.amount = result["amount_kg"]
+            sg.rule_version = llm_feeding.PROMPT_VERSION
+            sg.reason = (f"硅基流动大模型 {result['model']}：{result['reason']} "
+                         f"规则参考量 {maximum} kg；本次为课程演示建议，需人工核实确认。")
+            sg.inputs_json = json.dumps(inputs, ensure_ascii=False)
+        audit(db, "control", "suggest_generate", pond_id=pond_id,
+              user_id=requested_by, detail={"suggestion": sg.code, "amount": sg.amount,
+                  "mode": mode, "rule_version": sg.rule_version, "demo": True})
         try:
             db.commit()
             return sg, None
@@ -58,6 +111,11 @@ def generate(db, pond_id, batch_id=None, day=None, requested_by=None):
             if attempt == 3:
                 raise
     raise RuntimeError("unreachable")
+
+
+def datetime_from_snapshot(value):
+    from datetime import datetime
+    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
 
 
 def _build(db, pond_id, batch_id, day, requested_by):
@@ -166,10 +224,6 @@ def _build(db, pond_id, batch_id, day, requested_by):
         valid_until=now() + timedelta(minutes=valid_min),
     )
     db.add(sg)
-    audit(db, "control", "suggest_generate", pond_id=pond_id,
-          user_id=requested_by,
-          detail={"suggestion": sg.code, "amount": sg.amount,
-                  "rule_version": rule_version, "demo": True})
     return sg, None
 
 
@@ -188,6 +242,7 @@ def expire_stale(db):
 def serial(sg):
     if not sg:
         return None
+    inputs = json.loads(sg.inputs_json) if sg.inputs_json else {}
     return {
         "id": sg.id, "code": sg.code, "pond_id": sg.pond_id,
         "batch_id": sg.batch_id, "status": sg.status,
@@ -195,5 +250,7 @@ def serial(sg):
         "reason": sg.reason, "rule_version": sg.rule_version,
         "generated_at": sg.generated_at.strftime("%Y-%m-%d %H:%M:%S"),
         "valid_until": sg.valid_until.strftime("%Y-%m-%d %H:%M:%S"),
-        "inputs": json.loads(sg.inputs_json) if sg.inputs_json else None,
+        "inputs": inputs,
+        "source": "llm" if inputs.get("llm") else "rule",
+        "model": inputs.get("llm", {}).get("model"),
     }

@@ -43,7 +43,8 @@ def create_suggestion(pond_id):
     for attempt in range(4):
         try:
             sg, msg = sug_svc.generate(g.db, pond_id, batch_id=body.get("batch_id"),
-                                       day=day, requested_by=g.user.id)
+                                       day=day, requested_by=g.user.id,
+                                       mode=body.get("mode", "rule"))
             break
         except IntegrityError as e:
             last_exc = e
