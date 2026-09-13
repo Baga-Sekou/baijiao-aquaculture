@@ -123,14 +123,27 @@ def _pond_code(pond_id):
         return f"P{pond_id}"
 
 
-def stop():
-    """停止内嵌仿真终端。"""
+def stop(wait_sec=6.0):
+    """停止内嵌仿真终端，等待线程真正退出后再返回。
+
+    只设标志就返回会让调用方紧接着查到的状态仍是 running=True
+    （界面表现为「点了关闭但按钮还是绿的」），因此这里 join 线程。
+    等待超时则如实返回「仍在停止中」，不谎报已关闭。
+    """
     with _state_lock:
         if not _state["running"]:
             return False, "仿真终端未在运行"
-        if _state["stop"]:
-            _state["stop"].flag.set()
-    return True, "已发出停止指令"
+        stop_obj = _state["stop"]
+        th = _state["thread"]
+        if stop_obj:
+            stop_obj.flag.set()
+
+    # 在锁外等待，避免线程退出时抢锁造成死锁
+    if th is not None:
+        th.join(timeout=wait_sec)
+        if th.is_alive():
+            return True, "已发出停止指令，终端仍在退出中"
+    return True, "仿真终端已关闭"
 
 
 def status():
