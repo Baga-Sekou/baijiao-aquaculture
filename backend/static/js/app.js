@@ -235,12 +235,22 @@ async function initSimSwitch() {
   btn.disabled = true;
   btn.onclick = async () => {
     btn.disabled = true;
-    const on = btn.getAttribute('aria-pressed') === 'true';
-    const r = await API.post(on ? '/api/simulator/stop' : '/api/simulator/start', {});
-    if (!r.ok) toast(r.message || '操作失败', 'err');
-    else toast(r.message || (on ? '已关闭仿真终端' : '已开启仿真终端'), 'ok');
-    if (window.__simTimer) clearInterval(window.__simTimer);
-    await refresh();
+    try {
+      // 动作前先取一次真实状态：仿真终端是后端内存线程，
+      // 后端重启后会归零，若沿用页面上缓存的状态会发错命令
+      // （表现为「点了没反应」）。
+      const cur = await API.get('/api/simulator/status');
+      const running = !!(cur.ok && cur.data && cur.data.running);
+      const r = await API.post(running ? '/api/simulator/stop' : '/api/simulator/start', {});
+      if (!r.ok) {
+        toast(r.message || '操作失败', 'err');
+      } else {
+        toast(r.message || (running ? '已关闭仿真终端' : '已开启仿真终端'), 'ok');
+      }
+    } finally {
+      if (window.__simTimer) clearInterval(window.__simTimer);
+      await refresh();
+    }
   };
 
   await refresh();
