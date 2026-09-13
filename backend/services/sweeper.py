@@ -6,15 +6,18 @@
 
 这里用守护线程按固定间隔自动调用 task_service.check_timeouts。
 间隔由环境变量 TIMEOUT_SWEEP_SEC 控制：
-    >0  启用（默认 30 秒）
+    >0  启用（默认 5 秒，与默认 7 秒超时阈值配套，演示时约 10 秒内可见）
     =0  禁用 —— 验收脚本等需要精确控制时序的场景用这个，避免后台巡检
         抢先把任务转成 unknown，导致「回执超时」用例的断言不稳定。
+
+注意：实际转入待核查的耗时 ≈ 超时阈值 + 巡检间隔，
+调大 task_timeout_sec 时建议同步调大本间隔，避免无谓的空转查询。
 """
 import os
 import threading
 import time
 
-_interval = float(os.getenv("TIMEOUT_SWEEP_SEC", "30"))
+_interval = float(os.getenv("TIMEOUT_SWEEP_SEC", "5"))
 _started = False
 _lock = threading.Lock()
 

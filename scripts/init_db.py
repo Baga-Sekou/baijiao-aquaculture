@@ -129,7 +129,7 @@ def seed():
         cfgs = [
             ("sample_interval_sec", "600", "秒", "环境采集周期"),
             ("feed_suggest_valid_min", "30", "分钟", "投喂建议有效期"),
-            ("task_timeout_sec", "120", "秒", "任务回执超时"),
+            ("task_timeout_sec", "7", "秒", "任务回执超时（演示口径：等待回执超过该时长转待核查）"),
             ("max_feed_per_task", "1200", "kg", "单次投喂上限"),
             ("min_feed_per_task", "0.1", "kg", "单次投喂下限"),
             ("rule_version", "rule-v1.0", "", "当前投喂规则版本"),

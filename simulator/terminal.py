@@ -220,11 +220,20 @@ class Terminal:
         log("终端退出")
 
     def stop(self):
+        """置离线。失败时重试一次并如实记录，不静默吞掉——
+        否则会出现「一个终端已离线、另一个仍在线」的状态不一致。"""
         self.stopped.set()
-        try:
-            requests.post(f"{self.base}/api/terminals/{self.code}/offline", timeout=5)
-        except requests.RequestException:
-            pass
+        for attempt in range(2):
+            try:
+                r = requests.post(f"{self.base}/api/terminals/{self.code}/offline", timeout=5)
+                if r.ok:
+                    return True
+                log(f"下线返回 {r.status_code}，重试中")
+            except requests.RequestException as e:
+                log(f"下线失败（第 {attempt + 1} 次）: {e}")
+            time.sleep(0.3)
+        log(f"[警告] 终端 {self.code} 未能确认离线，请检查后端")
+        return False
 
 
 def main():

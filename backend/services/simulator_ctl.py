@@ -25,6 +25,12 @@ def _terminal_cls():
     from terminal import Terminal
     return Terminal
 
+
+def _base_url(port):
+    """内嵌仿真回调本机服务的基址（与 simulator.terminal.make_base 同义）。"""
+    from terminal import make_base
+    return make_base(port)
+
 # 仿真终端默认参数（演示口径）
 DEFAULT_POND_IDS = (1,)
 DEFAULT_INTERVAL = 3.0
@@ -37,6 +43,8 @@ _state = {
     "interval": DEFAULT_INTERVAL,
     "started_at": None,
     "replies": 0,          # 粗略统计自动应答次数（由终端日志侧累计）
+    # 本机服务基址：即使从未 start 过，也要能对残留的在线终端补发下线
+    "base": f"http://127.0.0.1:{os.getenv('APP_PORT', '5000')}",
 }
 
 
@@ -47,12 +55,11 @@ class _Stop:
 
 def _run_terminals(codes_ponds, interval, stop, port):
     """在后台线程里跑若干仿真终端，直到 stop 被置位。"""
-    from terminal import make_base
     Terminal = _terminal_cls()
     terms = []
     try:
         for code, pond_id in codes_ponds:
-            t = Terminal(code, pond_id, interval=interval, base=make_base(port))
+            t = Terminal(code, pond_id, interval=interval, base=_base_url(port))
             if not t.register():
                 print(f"[sim] 终端 {code} 注册失败，跳过")
                 continue
@@ -103,6 +110,7 @@ def start(port, pond_ids=DEFAULT_POND_IDS, interval=DEFAULT_INTERVAL):
                               daemon=True, name="embedded-simulator")
         _state.update(running=True, thread=th, stop=stop,
                       terminals=codes_ponds, interval=interval,
+                      base=_base_url(port),
                       started_at=time.strftime("%Y-%m-%d %H:%M:%S"))
         th.start()
     return True, f"仿真终端已启动：{', '.join(c for c, _ in codes_ponds)}"
@@ -123,27 +131,79 @@ def _pond_code(pond_id):
         return f"P{pond_id}"
 
 
-def stop(wait_sec=6.0):
-    """停止内嵌仿真终端，等待线程真正退出后再返回。
+def stop(wait_sec=8.0):
+    """停止内嵌仿真终端，确保所有终端都置为离线后再返回。
 
     只设标志就返回会让调用方紧接着查到的状态仍是 running=True
     （界面表现为「点了关闭但按钮还是绿的」），因此这里 join 线程。
-    等待超时则如实返回「仍在停止中」，不谎报已关闭。
+
+    随后再做一次**兜底下线**：线程退出时逐个 POST /offline，
+    若某个请求失败或超时，就会出现「一个终端已离线、另一个仍在线」的不一致。
+    这里不论线程状态如何都对全部终端补发一次下线（接口幂等），
+    也用于清理「启动失败但终端已被注册为在线」的残留状态。
     """
     with _state_lock:
-        if not _state["running"]:
-            return False, "仿真终端未在运行"
         stop_obj = _state["stop"]
         th = _state["thread"]
+        pairs = list(_state["terminals"])
+        running = _state["running"]
         if stop_obj:
             stop_obj.flag.set()
+
+    # 未在运行且无已知终端：退化为按鱼塘推断终端编号，清理残留在线状态
+    if not running and not pairs:
+        pairs = _known_pairs()
 
     # 在锁外等待，避免线程退出时抢锁造成死锁
     if th is not None:
         th.join(timeout=wait_sec)
-        if th.is_alive():
-            return True, "已发出停止指令，终端仍在退出中"
+
+    # 兜底：无论线程是否及时退出，都确保终端置为离线
+    leftovers = _offline_all(pairs)
+
+    if not running:
+        msg = "仿真终端已停止"
+        if leftovers:
+            msg += f"（{', '.join(leftovers)} 下线未确认）"
+        return False, msg
+    if th is not None and th.is_alive():
+        return True, "已发出停止指令，终端仍在退出中"
+    if leftovers:
+        return True, f"仿真终端已关闭（{leftovers} 个终端下线确认较慢）"
     return True, "仿真终端已关闭"
+
+
+def _known_pairs():
+    """按数据库里的鱼塘推断终端编号，用于清理残留的在线状态。"""
+    try:
+        from database import SessionLocal
+        from models import Terminal
+        db = SessionLocal()
+        try:
+            return [(t.code, t.pond_id) for t in db.query(Terminal).all()]
+        finally:
+            db.close()
+    except Exception:                             # noqa: BLE001
+        return []
+
+
+def _offline_all(pairs):
+    """对给定终端逐个 POST /offline（幂等）。返回未能确认下线的终端编号。"""
+    import requests as _rq
+
+    base = _state.get("base")
+    if not base:
+        return [c for c, _ in (pairs or [])]
+
+    failed = []
+    for code, _pond in pairs or []:
+        try:
+            r = _rq.post(f"{base}/api/terminals/{code}/offline", timeout=3)
+            if not r.ok:
+                failed.append(code)
+        except _rq.RequestException:
+            failed.append(code)
+    return failed
 
 
 def status():
