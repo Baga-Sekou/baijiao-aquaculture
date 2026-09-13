@@ -12,7 +12,8 @@
 import json
 from datetime import timedelta
 
-from models import Alert, Device, FeedingTask, Receipt, Review, Suggestion, Terminal
+from models import Alert, AuditLog, Device, FeedingTask, Receipt, Review, Suggestion, Terminal
+from sqlalchemy.orm import object_session
 from services.common import audit, cfg, cfg_float, now, parse_dt
 
 ACTIVE_STATUSES = ("pending", "dispatched", "running", "unknown")
@@ -324,13 +325,48 @@ def check_timeouts(db, timeout_sec=None):
     return len(timed_out)
 
 
-def review(db, task_no, user, conclusion, basis=None, evidence=None, device_recovery=None):
+def stop_requested(db, task):
+    return db.query(AuditLog.id).filter_by(task_id=task.id, action="stop_request").first() is not None
+
+
+def request_stop(db, task, user, reason):
+    if task.status not in ("dispatched", "running"):
+        return "只有已下发或执行中的任务可以请求停止"
+    if not isinstance(reason, str) or not reason.strip():
+        return "请填写停止原因"
+    if not stop_requested(db, task):
+        audit(db, "control", "stop_request", task_id=task.id, pond_id=task.pond_id,
+              user_id=user.id, detail={"reason": reason.strip()})
+        db.commit()
+    return None
+
+
+def review(db, task_no, user, conclusion, basis=None, evidence=None, device_recovery=None,
+           recovery_checks=None):
     """投喂核查。结论 done/stopped/failed/not_executed/unknown。"""
     task = db.query(FeedingTask).filter_by(task_no=task_no).first()
     if not task:
         return None, f"任务不存在：{task_no}"
     if conclusion not in ("done", "stopped", "failed", "not_executed", "unknown"):
         return None, "核查结论不合法"
+
+    if task.status not in ("unknown", "done", "stopped", "failed"):
+        return None, "任务仍在下发或执行，请先请求停止或等待超时核查"
+    if not isinstance(basis, str) or not basis.strip():
+        return None, "请填写核查依据"
+    if device_recovery is not None and not isinstance(device_recovery, str):
+        return None, "设备恢复依据必须是文字"
+    device_recovery = (device_recovery or "").strip() or None
+    if device_recovery:
+        if conclusion == "unknown":
+            return None, "执行结果仍不明，不能解除设备占用"
+        checks = recovery_checks if isinstance(recovery_checks, dict) else {}
+        if not all(checks.get(k) is True for k in
+                   ("terminal_idle", "old_command_disabled", "device_ready")):
+            return None, "请逐项确认终端无任务执行、旧指令不会继续执行、设备可用"
+    if conclusion == "unknown":
+        task.status = "unknown"
+        task.device_locked = True
 
     rv = Review(task_id=task.id, reviewer_id=getattr(user, "id", None),
                 conclusion=conclusion, basis=basis, evidence=evidence,
@@ -344,6 +380,7 @@ def review(db, task_no, user, conclusion, basis=None, evidence=None, device_reco
         if conclusion == "not_executed":
             task.actual_amount = None
             task.actual_source = "unknown"
+        task.finished_at = task.finished_at or now()
         # 解除设备占用的条件：核查结束且设备满足恢复条件
         if device_recovery:
             task.device_locked = False
@@ -351,7 +388,7 @@ def review(db, task_no, user, conclusion, basis=None, evidence=None, device_reco
     audit(db, "control", "review", pond_id=task.pond_id, task_id=task.id,
           user_id=getattr(user, "id", None),
           detail={"task_no": task_no, "conclusion": conclusion,
-                  "released": bool(device_recovery)})
+                  "released": bool(device_recovery), "recovery_checks": recovery_checks})
     db.commit()
     return task, None
 
@@ -369,6 +406,7 @@ def serial(task, with_receipts=False):
         "actual_source": task.actual_source,
         "unit": task.unit, "status": task.status,
         "change_reason": task.change_reason,
+        "stop_requested": stop_requested(object_session(task), task),
         "device_locked": task.device_locked,
         "approved_at": task.approved_at.strftime("%Y-%m-%d %H:%M:%S") if task.approved_at else None,
         "dispatched_at": task.dispatched_at.strftime("%Y-%m-%d %H:%M:%S") if task.dispatched_at else None,
@@ -383,6 +421,7 @@ def serial(task, with_receipts=False):
         } for r in sorted(task.receipts, key=lambda x: x.seq or 0)]
         d["reviews"] = [{
             "conclusion": rv.conclusion, "basis": rv.basis,
+            "evidence": rv.evidence, "reviewer_id": rv.reviewer_id,
             "device_recovery": rv.device_recovery, "conflict": rv.conflict,
             "created_at": rv.created_at.strftime("%Y-%m-%d %H:%M:%S") if rv.created_at else None,
         } for rv in task.reviews]

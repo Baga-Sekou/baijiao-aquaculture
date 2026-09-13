@@ -40,7 +40,7 @@ async function load() {
       <td>${x.area || '—'}${esc(x.area_unit || '')}</td>
       <td>${x.avg_temperature != null ? x.avg_temperature + '℃' : '<span class="muted">无数据</span>'}</td>
       <td>${x.avg_oxygen != null ? x.avg_oxygen + ' mg/L' : '<span class="muted">无数据</span>'}</td>
-      <td>${x.feed_kg}</td>
+      <td>${x.feed_kg}<div class="muted">${x.feed_unknown_tasks} 个任务实际量待核实</div></td>
       <td>${x.alerts ? `<span class="pill warn">${x.alerts}</span>` : 0}</td>
       <td>${x.medicine_count}</td>
       <td class="muted">${x.stage_weight_g ? '均重 ' + x.stage_weight_g + 'g' : '—'}</td>
@@ -62,8 +62,8 @@ async function load() {
     const d = f.data;
     $('#feedStats').innerHTML = `
       <div class="grid c3">
-        <div class="metric"><div class="k">今日投喂</div><div class="v">${d.feed_today_kg}</div><div class="s">kg（按确认量累计）</div></div>
-        <div class="metric"><div class="k">区间投喂</div><div class="v">${d.feed_window_kg}</div><div class="s">kg / ${d.window_days} 天</div></div>
+        <div class="metric"><div class="k">今日投喂</div><div class="v">${d.feed_today_kg}</div><div class="s">kg 已知实际量 · ${d.feed_today_unknown_tasks} 个任务待核实</div></div>
+        <div class="metric"><div class="k">区间投喂</div><div class="v">${d.feed_window_kg}</div><div class="s">kg 已知实际量 / ${d.window_days} 天 · ${d.feed_unknown_tasks} 个任务待核实</div></div>
         <div class="metric ${d.fcr == null ? '' : 'ok'}"><div class="k">饲料系数</div>
           <div class="v">${d.fcr == null ? '暂不能计算' : d.fcr}</div>
           <div class="s">${esc(d.fcr_note || '')}</div></div>

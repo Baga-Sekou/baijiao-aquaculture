@@ -13,6 +13,7 @@ from models import (Alert, Batch, CommunityPost, FeedingTask, Pond, PostReply,
                     User, WeighRecord)
 from services.common import (audit, can_view, fail, next_code, now, ok)
 from services.serialize import row
+from services.feed_statistics import consumption
 
 bp = Blueprint("community", __name__)
 
@@ -133,14 +134,6 @@ def close_post(post_id):
 def _pond_metrics(db, pond_id, since):
     """窗口期内可解释的单塘指标：饲料系数、生长速度、告警数。"""
 
-    def feed_sum(start=None):
-        q = db.query(func.sum(FeedingTask.confirm_amount)).filter(
-            FeedingTask.pond_id == pond_id,
-            FeedingTask.status.in_(["done", "stopped"]))
-        if start:
-            q = q.filter(FeedingTask.created_at >= start)
-        return q.scalar() or 0.0
-
     weighs_q = (db.query(WeighRecord)
                 .filter(WeighRecord.pond_id == pond_id,
                         WeighRecord.avg_weight.isnot(None)))
@@ -160,15 +153,15 @@ def _pond_metrics(db, pond_id, since):
         first, last = weighs[0], weighs[-1]
         gain_kg = (last.avg_weight - first.avg_weight) * n_fish / 1000.0
         # 分子与分母覆盖相同时间区间：只取两次称重之间的落定用料（与 feed-stats 一致）
-        consumed = (db.query(func.sum(FeedingTask.confirm_amount))
-                    .filter(FeedingTask.pond_id == pond_id,
-                            FeedingTask.created_at >= first.weighed_at,
-                            FeedingTask.created_at < last.weighed_at + timedelta(days=1),
-                            FeedingTask.status.in_(["done", "stopped"]))
-                    .scalar()) or 0.0
-        if gain_kg > 0 and consumed > 0:
-            fcr = round(consumed / gain_kg, 3)
-            fcr_basis = (f"用料 {consumed:.1f}kg / 增重 {gain_kg:.1f}kg"
+        consumed = consumption(db, pond_id, first.weighed_at,
+                               last.weighed_at + timedelta(days=1))
+        if not consumed["task_count"]:
+            fcr_basis = "称重区间内没有已结束的投喂记录，暂不能计算"
+        elif not consumed["complete"]:
+            fcr_basis = f"{consumed['unknown_tasks']} 个任务的实际量未确定，暂不能计算"
+        elif gain_kg > 0:
+            fcr = round(consumed["known_kg"] / gain_kg, 3)
+            fcr_basis = (f"实际用料 {consumed['known_kg']:.1f}kg / 增重 {gain_kg:.1f}kg"
                          f"（{first.weighed_at:%m-%d} ~ {last.weighed_at:%m-%d} 称重区间）")
 
     growth_rate, growth_basis = None, None
@@ -181,10 +174,11 @@ def _pond_metrics(db, pond_id, since):
 
     alerts = (db.query(func.count(Alert.id))
               .filter(Alert.pond_id == pond_id, Alert.created_at >= since).scalar()) or 0
-    feed_window = round(feed_sum(since), 1)
+    feed_window = consumption(db, pond_id, since)
     return {"fcr": fcr, "fcr_basis": fcr_basis,
             "growth_rate_g_day": growth_rate, "growth_basis": growth_basis,
-            "alerts": alerts, "feed_window_kg": feed_window,
+            "alerts": alerts, "feed_window_kg": feed_window["known_kg"],
+            "feed_unknown_tasks": feed_window["unknown_tasks"],
             "weigh_count": len(weighs)}
 
 
@@ -213,7 +207,7 @@ def leaderboard():
             ranked.append(entry)
         else:
             entry["rank"] = None
-            entry["not_ranked_reason"] = (
+            entry["not_ranked_reason"] = m["fcr_basis"] or (
                 "称重记录不足两次或缺少投魂数量，无法计算饲料系数" if m["weigh_count"] < 2
                 else "有效增重或饲料消耗为 0，无法计算饲料系数")
             insufficient.append(entry)

@@ -9,6 +9,7 @@ from models import (Alert, AuditLog, Batch, CostRecord, FeedingTask, Measurement
                     WeighRecord)
 from services.common import (audit, can_view, fail, now, ok, pond_brief)
 from services.serialize import row
+from services.feed_statistics import consumption
 
 bp = Blueprint("ops", __name__)
 
@@ -58,7 +59,8 @@ def dashboard(pond_id):
     tasks_today = (g.db.query(FeedingTask)
                    .filter(FeedingTask.pond_id == pond_id,
                            FeedingTask.created_at >= start).all())
-    # 已确认投喂量只累计落定任务（done/stopped）；未完成/失败不计入用料
+    actual_today = consumption(g.db, pond_id, start)
+    # 保留明确命名的确认量字段，实际用料单独返回。
     fed_today = sum(t.confirm_amount or 0 for t in tasks_today
                     if t.status in ("done", "stopped"))
 
@@ -74,7 +76,9 @@ def dashboard(pond_id):
         "today": {
             "tasks": len(tasks_today),
             "confirmed_feed_kg": round(fed_today, 2),
-            "note": "已确认投喂量按确认量累计；实际量未知的单独标明",
+            "actual_feed_kg": actual_today["known_kg"],
+            "unknown_tasks": actual_today["unknown_tasks"],
+            "note": "实际用料仅累计已知量，缺失任务单独标明",
         },
         "pending_alerts": [row(a, ["id", "kind", "level", "status", "message",
                                    "is_ongoing", "occurrence_count", "created_at"])
@@ -116,9 +120,7 @@ def compare():
         oxy = g.db.query(func.avg(Measurement.value)).filter(
             Measurement.pond_id == p.id, Measurement.metric == "oxygen",
             Measurement.valid.is_(True), Measurement.collected_at >= since).scalar()
-        feed = g.db.query(func.sum(FeedingTask.confirm_amount)).filter(
-            FeedingTask.pond_id == p.id, FeedingTask.created_at >= since,
-            FeedingTask.status.in_(["done", "stopped"])).scalar()
+        feed = consumption(g.db, p.id, since)
         alerts = g.db.query(func.count(Alert.id)).filter(
             Alert.pond_id == p.id, Alert.created_at >= since).scalar()
         meds = g.db.query(func.count(MedicineRecord.id)).filter(
@@ -131,7 +133,8 @@ def compare():
             "area": p.area, "area_unit": p.area_unit,
             "avg_temperature": round(temp, 2) if temp else None,
             "avg_oxygen": round(oxy, 2) if oxy else None,
-            "feed_kg": round(feed, 2) if feed else 0,
+            "feed_kg": feed["known_kg"],
+            "feed_unknown_tasks": feed["unknown_tasks"],
             "alerts": alerts or 0,
             "medicine_count": meds or 0,
             "sample_note": "数据条件不同的鱼塘不直接据此判定优劣",
@@ -318,16 +321,8 @@ def feed_stats(pond_id):
     today = datetime.now().date()
     t0 = datetime.combine(today, datetime.min.time())
 
-    def feed_sum(start):
-        # 用料口径：确认量 + 只计落定状态（done/stopped），与其他页面一致
-        v = (g.db.query(func.sum(FeedingTask.confirm_amount))
-             .filter(FeedingTask.pond_id == pond_id, FeedingTask.created_at >= start,
-                     FeedingTask.status.in_(["done", "stopped"]))
-             .scalar())
-        return round(v, 2) if v else 0.0
-
-    feed_today = feed_sum(t0)
-    feed_window = feed_sum(since)
+    feed_today = consumption(g.db, pond_id, t0)
+    feed_window = consumption(g.db, pond_id, since)
 
     # 饲料系数：需有效增重（两次称重）；只取本批次（含未归属批次但投苗之后），
     # 避免把上一批（如 CSV 历史数据）的体重接进同一条增重曲线。
@@ -347,16 +342,16 @@ def feed_stats(pond_id):
         first, last = weighs[0], weighs[-1]
         if n and first.avg_weight and last.avg_weight:
             gain_kg = (last.avg_weight - first.avg_weight) * n / 1000.0
-            consumed = (g.db.query(func.sum(FeedingTask.confirm_amount))
-                        .filter(FeedingTask.pond_id == pond_id,
-                                FeedingTask.created_at >= first.weighed_at,
-                                FeedingTask.created_at < last.weighed_at + timedelta(days=1),
-                                FeedingTask.status.in_(["done", "stopped"]))
-                        .scalar()) or 0
-            if gain_kg > 0:
-                fcr = round(consumed / gain_kg, 3)
+            consumed = consumption(g.db, pond_id, first.weighed_at,
+                                   last.weighed_at + timedelta(days=1))
+            if not consumed["task_count"]:
+                fcr_note = "称重区间内没有已结束的投喂记录，暂不能计算"
+            elif not consumed["complete"]:
+                fcr_note = f"称重区间内 {consumed['unknown_tasks']} 个任务的实际量未确定，暂不能计算"
+            elif gain_kg > 0:
+                fcr = round(consumed["known_kg"] / gain_kg, 3)
                 fcr_note = (f"口径：{first.weighed_at:%Y-%m-%d} ~ {last.weighed_at:%Y-%m-%d}"
-                            f" 称重区间内用料 {consumed:.2f}kg / 鱼体增重 {gain_kg:.2f}kg；"
+                            f" 称重区间内已知实际用料 {consumed['known_kg']:.2f}kg / 鱼体增重 {gain_kg:.2f}kg；"
                             f"区间之后的投喂不计入本系数")
             else:
                 fcr_note = "有效增重为 0 或负值，暂不能计算"
@@ -366,8 +361,10 @@ def feed_stats(pond_id):
         fcr_note = "称重记录不足两次，暂不能计算饲料系数"
 
     return ok({
-        "feed_today_kg": feed_today,
-        "feed_window_kg": feed_window,
+        "feed_today_kg": feed_today["known_kg"],
+        "feed_today_unknown_tasks": feed_today["unknown_tasks"],
+        "feed_window_kg": feed_window["known_kg"],
+        "feed_unknown_tasks": feed_window["unknown_tasks"],
         "window_days": days,
         "fcr": fcr,
         "fcr_note": fcr_note,

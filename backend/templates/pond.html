@@ -83,6 +83,16 @@
   <div id="taskTable"></div>
 </div>
 
+<dialog id="stopDialog" style="max-width:480px;width:90%;border:1px solid #ccc;border-radius:10px">
+  <form id="stopForm">
+    <h2>请求停止投喂</h2><p>请求后需等待设备反馈；未反馈时请现场处理。</p>
+    <label>停止原因<textarea class="input" id="stopReason" required></textarea></label>
+    <p id="stopError" role="alert"></p>
+    <button class="btn" type="submit">发送停止请求</button>
+    <button class="btn gray" type="button" onclick="document.getElementById('stopDialog').close()">取消</button>
+  </form>
+</dialog>
+
 <!-- 疑似死鱼事件 -->
 <div class="card" style="margin-top:14px">
   <h2>疑似死鱼事件</h2>
@@ -152,7 +162,8 @@ async function loadToday() {
   // 周均日投喂作为今日参考线
   const byDay = {};
   (charts.ok ? charts.data.feed : []).forEach(f => {
-    if (f.confirmed != null) byDay[f.t] = (byDay[f.t] || 0) + f.confirmed;
+    if (['done', 'stopped', 'failed'].includes(f.status) && f.actual != null)
+      byDay[f.t] = (byDay[f.t] || 0) + f.actual;
   });
   const days = Object.keys(byDay);
   const avg7 = days.length ? Object.values(byDay).reduce((a, b) => a + b, 0) / days.length : 0;
@@ -161,11 +172,11 @@ async function loadToday() {
     <div class="card ring-box" id="ringFeed" style="border:none;box-shadow:none"></div>`;
   ring($('#ringTask'), { label: '今日任务完成', value: doneN, max: Math.max(todays.length, 1),
     unit: ' 项', note: `今日共 ${todays.length} 个投喂任务` });
-  ring($('#ringFeed'), { label: '今日确认投喂 (kg)', value: today.confirmed_feed_kg || 0,
-    max: Math.max(Math.ceil(avg7 * 2) || 10, today.confirmed_feed_kg || 0), unit: ' kg',
-    color: '#2e75b6', note: days.length ? `近 ${days.length} 天日均 ${avg7.toFixed(1)} kg` : '暂无历史投喂' });
+  ring($('#ringFeed'), { label: '今日已知实际量 (kg)', value: today.actual_feed_kg || 0,
+    max: Math.max(Math.ceil(avg7 * 2) || 10, today.actual_feed_kg || 0), unit: ' kg',
+    color: '#2e75b6', note: days.length ? `有已知实际量的 ${days.length} 天日均 ${avg7.toFixed(1)} kg` : '暂无历史投喂' });
   $('#todayNote').textContent =
-    `今日任务 ${today.tasks} 次，已确认投喂 ${today.confirmed_feed_kg} kg（按确认量累计；实际量未知单独标明）。`;
+    `今日任务 ${today.tasks} 次，已知实际量 ${today.actual_feed_kg} kg，${today.unknown_tasks || 0} 个任务实际量待核实。`;
 }
 
 async function loadCharts() {
@@ -200,6 +211,24 @@ async function loadCams() {
   }).join('');
 }
 
+let stoppingTask = null;
+function stopTask(tn) {
+  stoppingTask = tn;
+  $('#stopForm').reset();
+  $('#stopError').textContent = '';
+  $('#stopDialog').showModal();
+}
+async function submitStop(event) {
+  event.preventDefault();
+  const reason = $('#stopReason').value.trim();
+  if (!reason) return;
+  const r = await API.post(`/api/tasks/${stoppingTask}/stop`, { reason });
+  if (!r.ok) { $('#stopError').textContent = r.message; return; }
+  $('#stopDialog').close();
+  toast(r.note, 'ok');
+  loadTasks();
+}
+
 async function loadTasks() {
   const r = await API.get(`/api/ponds/${POND}/tasks`);
   if (!r.ok) { $('#taskTable').innerHTML = `<div class="empty">${esc(r.message)}</div>`; return; }
@@ -215,7 +244,8 @@ async function loadTasks() {
       <td>${t.actual_amount == null ? '<span class="pill warn">未获取</span>' : t.actual_amount + esc(t.unit)}
           <span class="muted">${esc(t.actual_source || '')}</span></td>
       <td class="muted">${fmtTime(t.approved_at || t.dispatched_at)}</td>
-      <td><button class="btn sm ghost" onclick="showTask('${esc(t.task_no)}')">详情</button></td>
+      <td><button class="btn sm ghost" onclick="showTask('${esc(t.task_no)}')">详情</button>
+        ${['dispatched', 'running'].includes(t.status) ? `<button class="btn sm" onclick="stopTask('${esc(t.task_no)}')" ${t.stop_requested ? 'disabled' : ''}>${t.stop_requested ? '等待停止反馈' : '请求停止'}</button>` : ''}</td>
     </tr>`).join('')}</tbody></table>`;
 }
 
@@ -353,6 +383,7 @@ async function closeAlert(id) {
 
 document.addEventListener('DOMContentLoaded', () => {
   loadPond(); loadEnv(); loadToday(); loadCharts(); loadCams(); loadTasks(); loadEvents(); loadAlerts();
+  $('#stopForm').onsubmit = submitStop;
   $('#btnSuggest').onclick = suggest;
   $('#btnReport').onclick = async () => {
     const r = await API.post(`/api/ponds/${POND}/fish-events`, {

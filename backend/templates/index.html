@@ -34,7 +34,7 @@ async function load() {
     const alerts = (d.ok && d.data.pending_alerts) || [];
     const today = (d.ok && d.data.today) || {};
     const tempBad = t.connected && t.expired;
-    feedBars.push({ name: p.name, value: today.confirmed_feed_kg || 0, unit: ' kg' });
+    feedBars.push({ name: p.name, value: today.actual_feed_kg || 0, unit: ' kg' });
     alertBars.push({ name: p.name, value: alerts.length, unit: ' 条',
                      color: alerts.length ? 'linear-gradient(90deg,#C55A11,#d94f3d)' : undefined });
     cards.push(`
@@ -51,7 +51,7 @@ async function load() {
           <div id="gauge_t_${p.id}" class="gauge-wrap"></div>
           <div id="gauge_o_${p.id}" class="gauge-wrap"></div>
         </div>
-        <p class="muted">今日任务 ${today.tasks || 0} 次 · 已确认投喂 ${today.confirmed_feed_kg || 0} kg</p>
+        <p class="muted">今日任务 ${today.tasks || 0} 次 · 已知实际量 ${today.actual_feed_kg || 0} kg · ${today.unknown_tasks || 0} 个任务实际量待核实</p>
         ${alerts.length ? `<p><span class="pill bad">待处理异常 ${alerts.length}</span></p>` : '<p><span class="pill ok">无待处理异常</span></p>'}
         <a class="btn" href="/pond/${p.id}">进入单塘看板</a>
       </div>`);

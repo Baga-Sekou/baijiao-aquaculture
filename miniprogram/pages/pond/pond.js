@@ -48,6 +48,18 @@ Page({
       this.load();
     }).catch((e) => wx.showToast({ title: e.message || '下发失败', icon: 'none' }));
   },
+  stopTask(event) {
+    const tn = event.currentTarget.dataset.task;
+    wx.showModal({
+      title: '请求停止投喂', editable: true, placeholderText: '填写停止原因',
+      success: (r) => {
+        if (!r.confirm || !r.content || !r.content.trim()) return;
+        api.post(`/api/tasks/${tn}/stop`, { reason: r.content.trim() })
+          .then(() => { wx.showToast({ title: '等待设备停止反馈', icon: 'none' }); this.load(); })
+          .catch((e) => wx.showToast({ title: e.message || '请求失败', icon: 'none' }));
+      },
+    });
+  },
   predict() {
     wx.showLoading({ title: '预测中…' });
     api.get(`/api/ponds/${this.data.id}/model/predict?target=growth`).then(({ data }) => {
