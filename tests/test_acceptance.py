@@ -840,6 +840,9 @@ def start_isolated_server():
     env["APP_HOST"] = "127.0.0.1"
     env["APP_DEBUG"] = "0"
     env["PYTHONIOENCODING"] = "utf-8"
+    # 关闭后台自动超时巡检：否则它会抢先把任务转成 unknown，
+    # 使「回执超时」等用例的时序断言不稳定（本脚本自行控制巡检时机）。
+    env["TIMEOUT_SWEEP_SEC"] = "0"
 
     # 建表 + 基础数据（直接对测试库操作，与演示库完全隔离）
     subprocess.run([sys.executable, os.path.join("scripts", "init_db.py"), "--seed", "--quiet"],

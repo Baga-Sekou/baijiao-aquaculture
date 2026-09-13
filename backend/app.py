@@ -122,6 +122,8 @@ if __name__ == "__main__":
         try:
             # 常规模式使用生产级 WSGI 服务器（多线程，可并发）
             from waitress import serve
+            from services import sweeper
+            sweeper.start()          # 后台自动超时巡检（TIMEOUT_SWEEP_SEC 控制）
             serve(app, host=host, port=port, threads=8)
         except ImportError:
             print("  [提示] 未安装 waitress（pip install waitress），"

@@ -79,8 +79,14 @@
 
 <!-- 投喂记录 -->
 <div class="card" style="margin-top:14px">
-  <h2>投喂任务记录</h2>
-  <div id="taskTable"></div>
+  <div class="row">
+    <h2 style="margin:0">投喂任务记录</h2>
+    <span class="spacer"></span>
+    <span class="muted" id="taskAutoNote">每 5 秒自动刷新</span>
+    <button class="btn sm gray" id="btnRefreshTasks">立即刷新</button>
+  </div>
+  <div id="taskTable" style="margin-top:10px"></div>
+  <div id="taskDetail"></div>
 </div>
 
 <dialog id="stopDialog" style="max-width:480px;width:90%;border:1px solid #ccc;border-radius:10px">
@@ -229,10 +235,18 @@ async function submitStop(event) {
   loadTasks();
 }
 
-async function loadTasks() {
+async function loadTasks(silent) {
   const r = await API.get(`/api/ponds/${POND}/tasks`);
   if (!r.ok) { $('#taskTable').innerHTML = `<div class="empty">${esc(r.message)}</div>`; return; }
   if (!r.data.length) { $('#taskTable').innerHTML = '<div class="empty">暂无投喂任务</div>'; return; }
+  // 状态摘要：让「卡住」一眼可见，不用逐行看
+  const stuck = r.data.filter(t => t.device_locked).length;
+  const note = $('#taskAutoNote');
+  if (note) {
+    note.innerHTML = stuck
+      ? `<span class="pill bad">${stuck} 个任务占用设备</span> 每 5 秒自动刷新`
+      : '每 5 秒自动刷新';
+  }
   $('#taskTable').innerHTML = `<table><thead><tr>
     <th>任务号</th><th>状态</th><th>建议量</th><th>确认量</th><th>实际量</th><th>时间</th><th></th>
     </tr></thead><tbody>${r.data.map(t => `
@@ -253,16 +267,33 @@ async function showTask(tn) {
   const r = await API.get(`/api/tasks/${tn}`);
   if (!r.ok) { toast(r.message, 'err'); return; }
   const t = r.data;
-  const box = $('#suggestBox');
-  box.innerHTML = `<div class="reason">
-    <b>任务 ${esc(t.task_no)}</b> · ${statusCN(t.status)}<br>
-    建议量 ${t.suggested_amount ?? '—'} / 确认量 ${t.confirm_amount ?? '—'} / 实际量
-    ${t.actual_amount == null ? '未获取' : t.actual_amount} ${esc(t.unit)}
-    ${t.change_reason ? `<br>修改原因：${esc(t.change_reason)}` : ''}
-    <br>回执 ${t.receipts.length} 条：
-    ${t.receipts.map(x => `${esc(x.kind)}(${esc(x.status)})${x.late ? '[迟到]' : ''}${x.duplicate ? '[重复]' : ''}`).join('、') || '无'}
-    ${t.reviews.length ? `<br>核查：${t.reviews.map(v => esc(v.conclusion) + (v.conflict ? '（与回执冲突）' : '')).join('、')}` : ''}
-  </div>`;
+  // 就地展开在任务表下方：此前写到页面上方的「建议」卡片里，
+  // 与按钮相隔很远，用户看不到变化会误以为按钮没作用。
+  const box = $('#taskDetail');
+  const same = box.dataset.task === tn;
+  if (same) { box.innerHTML = ''; box.dataset.task = ''; return; }  // 再点收起
+  box.dataset.task = tn;
+  box.innerHTML = `
+    <div class="reason" style="margin-top:12px">
+      <div class="row">
+        <b>任务 ${esc(t.task_no)}</b>
+        <span class="pill">${statusCN(t.status)}</span>
+        ${t.device_locked ? '<span class="pill bad">设备占用中</span>' : '<span class="pill ok">设备已释放</span>'}
+        <span class="spacer"></span>
+        <button class="btn sm gray" onclick="showTask('${esc(tn)}')">收起</button>
+      </div>
+      建议量 ${t.suggested_amount ?? '—'} / 确认量 ${t.confirm_amount ?? '—'} / 实际量
+      ${t.actual_amount == null ? '未获取' : t.actual_amount} ${esc(t.unit)}
+      <span class="muted">${esc(t.actual_source || '')}</span>
+      ${t.change_reason ? `<br>修改原因：${esc(t.change_reason)}` : ''}
+      <br>请求编号：${esc(t.request_no || '—')}
+      <br>回执 ${(t.receipts || []).length} 条：
+      ${(t.receipts || []).map(x =>
+        `${esc(x.kind)}(${esc(x.status)})${x.late ? '[迟到]' : ''}${x.duplicate ? '[重复]' : ''}`
+      ).join('、') || '无'}
+      ${(t.reviews || []).length ? `<br>核查：${t.reviews.map(v =>
+        esc(v.conclusion) + (v.conflict ? '（与回执冲突）' : '')).join('、')}` : ''}
+    </div>`;
 }
 
 function renderSuggestion(sg) {
@@ -385,6 +416,13 @@ document.addEventListener('DOMContentLoaded', () => {
   loadPond(); loadEnv(); loadToday(); loadCharts(); loadCams(); loadTasks(); loadEvents(); loadAlerts();
   $('#stopForm').onsubmit = submitStop;
   $('#btnSuggest').onclick = suggest;
+  // 任务状态会由终端/仿真器异步改变，定时刷新让状态变化自动可见
+  // （此前只在初始加载与提交建议后刷新，任务会一直停在「已下发待回执」）
+  setInterval(() => loadTasks(true), 5000);
+  $('#btnRefreshTasks').onclick = async () => {
+    await loadTasks(true);
+    toast('任务状态已刷新', 'ok');
+  };
   $('#btnReport').onclick = async () => {
     const r = await API.post(`/api/ponds/${POND}/fish-events`, {
       position_desc: '水面西南角', observation: '巡塘时发现 2 尾疑似死鱼', source: 'manual',
