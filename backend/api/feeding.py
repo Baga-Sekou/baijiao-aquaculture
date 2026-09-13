@@ -151,12 +151,19 @@ def list_tasks(pond_id):
 
 @bp.get("/tasks")
 def list_all_tasks():
-    """待核查列表：跨鱼塘查询结果未知/待核查任务。"""
+    """待核查列表：跨鱼塘查询。
+
+    status=locked（默认优先）：所有仍占用设备的任务——不论状态是
+    unknown / stopped / failed / dispatched，只要 device_locked=True
+    就列出来。这样用户总能找到「恢复通道」，不会被状态筛选挡住。
+    """
     if not g.user:
         return fail("未提供有效身份", 401)
-    status = request.args.get("status", "unknown")
+    status = request.args.get("status", "locked")
     q = g.db.query(FeedingTask)
-    if status != "all":
+    if status == "locked":
+        q = q.filter(FeedingTask.device_locked.is_(True))
+    elif status != "all":
         q = q.filter(FeedingTask.status == status)
     rows = [t for t in q.order_by(FeedingTask.id.desc()).limit(200).all()
             if can_view(g.db, g.user, t.pond_id)]

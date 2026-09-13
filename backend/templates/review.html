@@ -2,9 +2,10 @@
 {% block title %}待核查 · 白蕉水产养殖管理平台{% endblock %}
 {% block content %}
 <h1>投喂任务核查</h1>
-<p class="muted">执行结果不明的任务进入待核查；核实前不自动重新下发投料。核查需具备核查权限。</p>
+<p class="muted">执行结果不明、或已停止/失败但仍占用设备的任务进入待核查；核实前不自动重新下发投料。核查需具备核查权限。</p>
 <div class="row" style="margin-bottom:12px">
   <select class="input" id="filter" style="width:auto">
+    <option value="locked">占用设备（需核查释放）</option>
     <option value="unknown">结果未知（待核查）</option>
     <option value="failed">失败</option>
     <option value="all">全部</option>
@@ -52,7 +53,9 @@ async function load() {
           ${t.actual_amount == null ? '未获取' : t.actual_amount} ${esc(t.unit)}</td>
       <td>${t.device_locked ? '<span class="pill bad">占用中</span>' : '<span class="pill ok">已释放</span>'}</td>
       <td class="muted">${(t.receipts || []).map(x => esc(x.kind) + (x.late ? '·迟到' : '')).join('、') || '无'}</td>
-      <td>${['unknown','failed','done','stopped'].includes(t.status) ? `<button class="btn sm" onclick="openReview('${esc(t.task_no)}')">核查</button>` : '<span class="muted">已结束</span>'}</td>
+      <td>${['unknown','failed','done','stopped'].includes(t.status)
+        ? `<button class="btn sm" onclick="openReview('${esc(t.task_no)}')">核查</button>`
+        : `<span class="muted">${statusCN(t.status)}·先超时巡检</span>`}</td>
     </tr>`).join('')}</tbody></table>`;
 }
 

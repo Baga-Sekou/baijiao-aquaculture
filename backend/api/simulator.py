@@ -35,7 +35,9 @@ def sim_start():
     if err:
         return err
     body = request.get_json(silent=True) or {}
-    ponds = body.get("pond_ids") or [1]
+    # 默认覆盖全部鱼塘：只起一个塘的终端会让别的塘的任务卡在「已下发」，
+    # 演示时容易误以为系统坏了。需要单塘演示时可显式传 pond_ids。
+    ponds = body.get("pond_ids") or _all_pond_ids(g.db)
     interval = float(body.get("interval") or 3)
     port = int(request.host.split(":")[-1]) if ":" in request.host else 5000
     started, msg = simulator_ctl.start(port, pond_ids=[int(p) for p in ponds],
@@ -43,6 +45,11 @@ def sim_start():
     if not started:
         return ok(simulator_ctl.status(), message=msg)
     return ok(simulator_ctl.status(), message=msg)
+
+
+def _all_pond_ids(db):
+    from models import Pond
+    return [p.id for p in db.query(Pond).order_by(Pond.id).all()]
 
 
 @bp.post("/simulator/stop")
