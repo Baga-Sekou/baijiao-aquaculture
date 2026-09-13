@@ -17,6 +17,13 @@
     python simulator/terminal.py --code TERM-A01 --pond 1 --fault stuck
 """
 import argparse
+import hashlib
+from pathlib import Path
+
+try:
+    from .task_journal import TaskJournal
+except ImportError:
+    from task_journal import TaskJournal
 import json
 import os
 import random
@@ -40,13 +47,18 @@ def log(*a):
 
 
 class Terminal:
-    def __init__(self, code, pond_id, fault=None, interval=10, dry_run=False):
+    def __init__(self, code, pond_id, fault=None, interval=10, dry_run=False,
+                 state_dir=None, execution_seconds=2):
         self.code = code
         self.pond_id = pond_id
         self.fault = fault
         self.interval = interval
         self.dry_run = dry_run
-        self.seen_tasks = set()          # 已接收任务号，用于去重（模拟断电重启后从本地恢复）
+        state_dir = Path(state_dir or Path(__file__).resolve().parents[1] / "data" / "terminal-state")
+        key = hashlib.sha256(f"{BASE}|{code}".encode()).hexdigest()[:24]
+        self.journal = TaskJournal(state_dir / f"{key}.sqlite")
+        self.execution_seconds = execution_seconds
+        self.active_request = None
         self.stopped = threading.Event()
         self.rng = random.Random(hash(code) & 0xffff)
 
@@ -107,18 +119,30 @@ class Terminal:
         payload = {"task_no": task_no, "kind": kind, "status": status,
                    "actual_amount": actual, "fault": fault,
                    "occurred_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        if kind in ("finish", "stop") and self.active_request:
+            self.journal.finish(self.active_request, payload)
+        return self.send_receipt(payload)
+
+    def send_receipt(self, payload):
         try:
             r = requests.post(f"{BASE}/api/receipts", json=payload, timeout=5)
-            return r.ok
+            return r.ok and r.json().get("ok") is True
         except requests.RequestException:
             return False
 
     def handle_task(self, task):
         no = task["task_no"]
-        # 去重：重连/重启后仍能识别已接收任务
-        if no in self.seen_tasks:
+        request_no = task.get("request_no")
+        if not request_no:
+            log(f"拒绝任务 {no}：缺少稳定请求编号")
             return
-        self.seen_tasks.add(no)
+        # 认领落盘后才能执行；重启后只补发已保存的结果，未定结果留待人工核查。
+        if not self.journal.claim(request_no, no):
+            saved = self.journal.receipt(request_no)
+            if saved:
+                self.send_receipt(saved)
+            return
+        self.active_request = request_no
         log(f"接收任务 {no}: 确认量 {task['confirm_amount']}{task['unit']}")
 
         # 接收回执
@@ -131,15 +155,22 @@ class Terminal:
 
         # 执行中
         self.receipt(no, "execute", "running")
-        time.sleep(0.5)
-
-        if task.get("stop_requested") or (self.fault == "stop"):
-            if self.fault == "slow_stop":
-                log(f" [{no}] 设备不支持远程停止，等待现场处理")
+        deadline = time.monotonic() + self.execution_seconds
+        while True:
+            wants_stop = task.get("stop_requested") or self.fault == "stop"
+            if wants_stop:
+                if self.fault == "slow_stop":
+                    log(f" [{no}] 设备不支持远程停止，等待现场处理/后端超时核查")
+                    return
+                self.receipt(no, "stop", "stopped", actual=None)
+                log(f" [{no}] 已停止（实际量未获取）")
                 return
-            self.receipt(no, "stop", "stopped", actual=None)
-            log(f" [{no}] 已停止")
-            return
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+            current = next((x for x in self.poll_tasks() if x["task_no"] == no), None)
+            if current:
+                task = current
 
         if self.fault == "stuck":
             self.receipt(no, "finish", "failed", actual=0.0, fault="卡料")

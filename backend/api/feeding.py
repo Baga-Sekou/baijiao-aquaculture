@@ -188,6 +188,24 @@ def post_receipt():
     return ok(task_svc.serial(task, with_receipts=True))
 
 
+# ---------------------------------------------------------------- 人工请求停止
+@bp.post("/tasks/<task_no>/stop")
+def stop_task(task_no):
+    if not g.user:
+        return fail("未提供有效身份", 401)
+    task = g.db.query(FeedingTask).filter_by(task_no=task_no).first()
+    if not task:
+        return fail("任务不存在", 404)
+    err = _auth(need_control=True, pond_id=task.pond_id)
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    msg = task_svc.request_stop(g.db, task, g.user, body.get("reason"))
+    if msg:
+        return fail(msg, 400)
+    return ok(task_svc.serial(task), note="已请求停止，等待设备反馈；未反馈时需现场处理")
+
+
 # ---------------------------------------------------------------- 核查
 @bp.post("/tasks/<task_no>/review")
 def review_task(task_no):
@@ -204,7 +222,8 @@ def review_task(task_no):
     task, msg = task_svc.review(
         g.db, task_no, g.user, conclusion,
         basis=body.get("basis"), evidence=body.get("evidence"),
-        device_recovery=body.get("device_recovery"))
+        device_recovery=body.get("device_recovery"),
+        recovery_checks=body.get("recovery_checks"))
     if msg:
         return fail(msg, 400)
     return ok(task_svc.serial(task, with_receipts=True))

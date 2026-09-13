@@ -251,7 +251,8 @@ def s_review_recover():
     tn = tasks[0]["task_no"]
     _, r = call("POST", f"/api/tasks/{tn}/review", user="owner", json={
         "conclusion": "not_executed", "basis": "查询终端执行记录，无该任务执行痕迹",
-        "evidence": "现场查看无投料", "device_recovery": "终端已无该任务，旧指令不再执行"})
+        "evidence": "现场查看无投料", "device_recovery": "终端已无该任务，旧指令不再执行",
+        "recovery_checks": {"terminal_idle": True, "old_command_disabled": True, "device_ready": True}})
     passed = r["data"]["status"] == "failed" and r["data"]["device_locked"] is False
     check("核查与恢复", "核实未执行的任务，登记结论及依据，再尝试新建任务",
           "有权限者登记结论及依据；核查结束且设备满足恢复条件时解除占用", passed,
@@ -264,7 +265,8 @@ def s_late_receipt():
     # 核查判为未执行
     call("POST", f"/api/tasks/{tn}/review", user="owner", json={
         "conclusion": "not_executed", "basis": "现场确认",
-        "device_recovery": "设备可用"})
+        "device_recovery": "设备可用",
+        "recovery_checks": {"terminal_idle": True, "old_command_disabled": True, "device_ready": True}})
     # 迟到回执说完成了 -> 冲突
     call("POST", "/api/receipts", json={"task_no": tn, "kind": "finish",
                                         "status": "done", "actual_amount": 8.8})
@@ -300,7 +302,7 @@ def s_stop_and_fault():
     _, al = call("GET", "/api/alerts", user="owner")
     has_alert = any(a["kind"] == "feed_fail" for a in al["data"])
     passed = d["data"]["status"] == "failed" and has_alert
-    check("停止与卡料", "模拟卡料反馈",
+    check("卡料回执", "模拟卡料反馈",
           "按设备反馈更新状态，保留异常和已知执行量", passed,
           f"状态={d['data']['status']}，实际量={d['data']['actual_amount']}，产生异常告警={has_alert}")
 
@@ -394,7 +396,7 @@ def s_model_interface():
     _, pb = call("GET", "/api/ponds/1/model/predict?target=growth", user="owner")
     honest = (not pb.get("ok")) and pb.get("reason") in ("model_not_trained", "insufficient_data")
     passed = ok3 and fields_ok and honest
-    check("模型训练与测试", "用 60 天称重/8 天投喂/24 小时水质训练三个模型并预测",
+    check("模型训练与预测接口（未完成独立效果测试）", "用 60 天称重/8 天投喂/24 小时水质训练三个模型并预测",
           "输出目标/单位/时间范围/版本明确；未训练时明确报错，不返回伪预测", passed,
           f"训练 growth/feed/water 全成功={ok3}；生长预测当前 {pg.get('data', {}).get('current_weight_g')}g、"
           f"日增 {pg.get('data', {}).get('daily_gain_g')}g、达标 {pg.get('data', {}).get('days_to_target')} 天；"
@@ -737,7 +739,7 @@ def s_input_validation():
 
 
 def s_fcr_consistency():
-    """FCR 口径：失败任务与称重区间外的投喂不计入，各页面数值一致。"""
+    """FCR 口径：失败任务已知实际量计入用料；称重区间外不计入 FCR。"""
     reset()
     from database import SessionLocal
     from models import FeedingTask, WeighRecord
@@ -752,7 +754,8 @@ def s_fcr_consistency():
             ts = today - timedelta(days=d)
             db.add(FeedingTask(
                 task_no=f"TK-FCR-{d}", request_no=f"REQ-FCR-{d}", pond_id=2,
-                suggested_amount=amt, confirm_amount=amt, unit="kg",
+                suggested_amount=amt, confirm_amount=amt, actual_amount=amt,
+                actual_source="measured", unit="kg",
                 status=st, device_locked=False, approved_at=ts, created_at=ts,
                 finished_at=ts))
         db.commit()
@@ -763,10 +766,10 @@ def s_fcr_consistency():
     a02 = next((x for x in lb["data"] if x["pond"]["code"] == "A02"), {})
     expected = round(100 / 6200, 3)
     passed = (fs["data"]["fcr"] == expected
-              and fs["data"]["feed_window_kg"] == 100.0
+              and fs["data"]["feed_window_kg"] == 600.0
               and a02.get("fcr") == expected)
     check("FCR口径", "两次称重间完成 100kg、之后失败 500kg，查 feed-stats 与排行榜",
-          "失败任务不计入用料；分子限称重区间；两页面 FCR 一致", passed,
+          "失败后的已知实际量计入区间用料；FCR 分子限称重区间；两页面 FCR 一致", passed,
           f"feed-stats FCR={fs['data']['fcr']}（期望 {expected}），"
           f"用料={fs['data']['feed_window_kg']}kg，排行榜 A02 FCR={a02.get('fcr')}")
 

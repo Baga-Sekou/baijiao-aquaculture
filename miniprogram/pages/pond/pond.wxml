@@ -36,5 +36,9 @@
   <view class="row" wx:for="{{tasks}}" wx:key="task_no" style="justify-content:space-between;margin:8rpx 0">
     <text class="muted">{{item.task_no}}</text>
     <text>{{item.status}}</text>
+    <button wx:if="{{item.status === 'dispatched' || item.status === 'running'}}"
+      size="mini" bindtap="stopTask" data-task="{{item.task_no}}" disabled="{{item.stop_requested}}">
+      {{item.stop_requested ? '等待停止反馈' : '请求停止'}}
+    </button>
   </view>
 </view>

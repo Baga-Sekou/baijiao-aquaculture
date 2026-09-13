@@ -76,7 +76,7 @@ async function loadBoard() {
       <td>${esc(e.pond.name)}</td>
       <td>${e.fcr != null ? `<b>${e.fcr}</b>` : `<span class="pill warn">未参与</span>`}</td>
       <td>${e.growth_rate_g_day != null ? e.growth_rate_g_day + ' g/天' : '—'}</td>
-      <td>${e.feed_window_kg} kg</td>
+      <td>${e.feed_window_kg} kg 已知实际量<div class="muted">${e.feed_unknown_tasks} 个任务待核实</div></td>
       <td>${e.alerts}</td>
       <td class="muted">${esc(e.fcr_basis || e.not_ranked_reason || '')}
         ${e.growth_basis ? `<br>${esc(e.growth_basis)}` : ''}</td>

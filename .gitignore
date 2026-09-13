@@ -19,5 +19,6 @@ data/*.sqlite
 Thumbs.db
 
 # 训练出的模型与上传帧（运行产物，可重新生成）
+data/terminal-state/
 data/models/
 backend/static/frames/
