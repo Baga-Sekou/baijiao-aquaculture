@@ -73,15 +73,19 @@ def seed_recent_hours(db, pond_id, batch_id, terminal_id, hours=26):
     return n
 
 
-def seed_tasks(db, pond_id, batch_id, terminal_id, device_id, user_id, count=8):
-    """已完成任务 + 1 个待核查 + 1 条卡料失败。"""
-    base = NOW - timedelta(days=count * 2 + 3)
+def seed_tasks(db, pond_id, batch_id, terminal_id, device_id, user_id, count=50):
+    """已完成任务 + 1 个待核查 + 1 条卡料失败。
+
+    投喂量按课堂 CSV 的真实量级（77~1066 kg/次）设定，单次约 970 kg；
+    已完成任务均匀分布在最近 250 天内，与最后两次称重的区间重合，
+    使 FCR 落在真实范围（约 1.5，即 1.5kg 饲料长 1kg 鱼）。
+    """
     made = []
     for i in range(count):
-        ts = base + timedelta(days=i * 2, hours=rng.randint(0, 4))
+        ts = NOW - timedelta(days=250 - i * 5, hours=rng.randint(0, 4))
         sg = Suggestion(code=next_code(db, Suggestion, "code", "SG"),
                         pond_id=pond_id, batch_id=batch_id, status="confirmed",
-                        amount=round(rng.uniform(8, 14), 2), unit="kg",
+                        amount=round(rng.uniform(910, 1030), 2), unit="kg",
                         reason="演示规则 rule-v1.0（测试用途，非养殖依据）："
                                "鱼重 × 基础比例 × 温度系数 × 摄食系数",
                         rule_version="rule-v1.0", generated_at=ts,
@@ -164,11 +168,16 @@ def seed_pond(db, pond_code, wang, owner, with_tasks=True):
 
     课堂 CSV 只有 A01，A02 没有任何真实读数；这里为 A02 生成 source=sim
     的演示曲线，使多塘比较有可比对象。数据来源已在界面上标为仿真。
+
+    幂等：本函数会先清除该塘此前由本脚本生成的数据（signature 标记），
+    反复运行不会叠加任务与告警。
     """
     pond = db.query(Pond).filter_by(code=pond_code).first()
     if not pond:
         print(f"[skip] 鱼塘 {pond_code} 不存在")
         return 0, 0
+    _clear_pond(db, pond.id)
+
     batch = db.query(Batch).filter_by(pond_id=pond.id, status="active").first()
     from models import Device, Terminal
     term = db.query(Terminal).filter_by(pond_id=pond.id).first()
@@ -206,9 +215,15 @@ def seed_pond(db, pond_code, wang, owner, with_tasks=True):
                           used_at=NOW - timedelta(days=8), item="生石灰",
                           amount=150, unit="kg", operator_id=wang.id,
                           note="定期水体消毒"))
-    for i, w in enumerate((51.3, 180.0, 420.0, 640.0, 780.8)):
+    # 称重记录必须落在批次窗口内（投苗日之后），否则会被 growth 模型
+    # 与 FCR 统计正确排除；本批次投苗日为 2026-01-10，故取 235 天内。
+    # FCR 口径为「首尾两次称重」之间的区间（235 天前 180g → 12 天前 780.8g）：
+    #   增重 = (780.8-180) × 54000 / 1000 ≈ 32,443 kg
+    #   区间用料 ≈ 该区间内已完成的投喂任务（约 41,800 kg）
+    #   FCR ≈ 1.29，落在真实鲈鱼饲料系数范围（约 1.2~1.8）
+    for d, w in ((235, 180.0), (160, 400.0), (85, 563.0), (12, 780.8)):
         db.add(WeighRecord(pond_id=pond.id, batch_id=batch.id,
-                           weighed_at=NOW - timedelta(days=300 - i * 70),
+                           weighed_at=NOW - timedelta(days=d),
                            avg_weight=w, sample_count=30, operator_id=wang.id,
                            note="定期抽样"))
     db.add(CostRecord(pond_id=pond.id, batch_id=batch.id, kind="actual",
@@ -218,6 +233,37 @@ def seed_pond(db, pond_code, wang, owner, with_tasks=True):
     return n_env, 1
 
 
+def _clear_pond(db, pond_id):
+    """清除本脚本此前为该塘生成的数据，保证 seed 幂等。
+
+    只删由 seed_demo 产生的记录：任务/建议按其 request_no/task_no 前缀
+    无法区分，故按「该塘 + 关联对象」整体清理运行数据，再重建。
+    导入的 CSV 测量（source='csv'）保留。
+    """
+    from models import (Alert, CostRecord, FeedingFeedback, FeedingTask,
+                        FishEvent, Measurement, MedicineRecord, PlanTask,
+                        Receipt, Review, Suggestion, WeighRecord)
+
+    task_ids = [t.id for t in db.query(FeedingTask).filter_by(pond_id=pond_id).all()]
+    if task_ids:
+        db.query(Receipt).filter(Receipt.task_id.in_(task_ids)).delete(synchronize_session=False)
+        db.query(Review).filter(Review.task_id.in_(task_ids)).delete(synchronize_session=False)
+    db.query(Alert).filter(Alert.pond_id == pond_id).delete(synchronize_session=False)
+    db.query(FeedingTask).filter(FeedingTask.pond_id == pond_id).delete(synchronize_session=False)
+    db.query(Suggestion).filter(Suggestion.pond_id == pond_id).delete(synchronize_session=False)
+    db.query(FeedingFeedback).filter(FeedingFeedback.pond_id == pond_id).delete(synchronize_session=False)
+    db.query(FishEvent).filter(FishEvent.pond_id == pond_id).delete(synchronize_session=False)
+    db.query(PlanTask).filter(PlanTask.pond_id == pond_id).delete(synchronize_session=False)
+    db.query(MedicineRecord).filter(MedicineRecord.pond_id == pond_id).delete(synchronize_session=False)
+    db.query(CostRecord).filter(CostRecord.pond_id == pond_id).delete(synchronize_session=False)
+    # 保留 CSV 导入的真实数据，只重建仿真曲线与抽样称重
+    db.query(Measurement).filter(Measurement.pond_id == pond_id,
+                                 Measurement.source == "sim").delete(synchronize_session=False)
+    db.query(WeighRecord).filter(WeighRecord.pond_id == pond_id,
+                                 WeighRecord.note == "定期抽样").delete(synchronize_session=False)
+    db.commit()
+
+
 def main():
     db = SessionLocal()
     try:
@@ -225,21 +271,17 @@ def main():
         wang = db.query(User).filter_by(username="wang").first()
         owner = db.query(User).filter_by(username="owner").first()
 
-        # 清掉旧的 sim 数据，避免叠加
-        db.query(Measurement).filter_by(source="sim").delete()
-        db.query(WeighRecord).filter(WeighRecord.note == "定期抽样").delete(synchronize_session=False)
-        db.commit()
-
+        # seed_pond 内部会先清理该塘的演示数据，反复运行不会叠加
         # A01 为主塘（含 CSV 历史数据），给完整演示集；
         # A02 只给环境曲线，使多塘比较有可比对象
         n1, t1 = seed_pond(db, "A01", wang, owner, with_tasks=True)
         n2, t2 = seed_pond(db, "A02", wang, owner, with_tasks=False)
 
         db.commit()
-        print(f"[ok] 演示数据已生成：")
-        print(f"     A01 环境测量 {n1} 条 + 投喂任务 10 条 + 告警 2 条 + 事件 1 条")
+        print("[ok] 演示数据已生成（幂等，可重复运行）：")
+        print(f"     A01 环境测量 {n1} 条 + 投喂任务 10 条 + 告警 + 事件 + 运营记录")
         print(f"     A02 环境测量 {n2} 条（仅环境曲线，供多塘比较）")
-        print(f"     来源均标为 sim，界面标注为仿真数据")
+        print("     来源均标为 sim；导入的 CSV 历史数据（source=csv）保留")
     finally:
         db.close()
 
