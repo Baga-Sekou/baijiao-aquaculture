@@ -1,13 +1,12 @@
 {% extends "base.html" %}
 {% block title %}单塘看板 · 白蕉水产养殖管理平台{% endblock %}
 {% block content %}
-<div class="row">
-  <h1 id="pondName">单塘看板</h1>
-  <span class="spacer"></span>
-  <span id="batchPill" class="pill"></span>
-</div>
+<div class="page-heading"><div><div class="eyebrow">POND WORKSPACE</div><h1 id="pondName">单塘看板</h1><p>从环境变化到投喂反馈，查看完整养殖记录。</p></div><a class="btn gray" href="/">返回总览 ↗</a></div>
+<div class="row"><span id="batchPill" class="pill"></span></div>
+<nav class="page-jumps" aria-label="单塘页内导航"><a href="#environment">环境监测</a><a href="#feeding">投喂管理</a><a href="#records">任务记录</a><a href="#monitor">塘口监控</a><a href="#prediction">模型预测</a></nav>
 
 <!-- 环境指标（仪表盘） -->
+<div id="environment"></div>
 <div id="envCards" class="grid c4"></div>
 
 <div class="grid c2" style="margin-top:14px">
@@ -19,12 +18,12 @@
   </div>
   <!-- 投喂：建议 → 人工确认 -->
   <div class="card">
-    <h2>投喂建议与确认</h2>
+    <h2 id="feeding">投喂建议与确认</h2>
     <div class="row" style="margin-bottom:10px">
       <button class="btn" id="btnSuggest">生成投喂建议</button>
       <span class="muted" id="suggestHint">系统提供建议，需人工确认后执行；建议量、确认量、实际量分别保存。</span>
     </div>
-    <div id="suggestBox"></div>
+    <div id="suggestBox"><div class="suggest-empty"><span class="suggest-step">01</span><b>先查看环境，再决定投喂</b><p>生成建议后，可核对数量、填写调整原因，再确认下发。</p><div class="flow-labels">环境数据 <span>→</span> 生成建议 <span>→</span> 人工确认</div></div></div>
   </div>
 </div>
 
@@ -38,9 +37,32 @@
   </div>
 </div>
 
+<!-- 投喂记录 -->
+<div class="card" style="margin-top:14px">
+  <div class="row">
+    <h2 id="records" style="margin:0">投喂任务记录</h2>
+    <span class="spacer"></span>
+    <span class="muted" id="taskAutoNote">每 5 秒自动刷新</span>
+    <button class="btn sm gray" id="btnRefreshTasks">立即刷新</button>
+  </div>
+  <div id="taskTable" style="margin-top:10px"></div>
+  <div id="taskDetail"></div>
+</div>
+
+<dialog id="stopDialog" style="max-width:480px;width:90%;border:1px solid #ccc;border-radius:10px">
+  <form id="stopForm">
+    <h2>请求停止投喂</h2><p>请求后需等待设备反馈；未反馈时请现场处理。</p>
+    <label>停止原因<textarea class="input" id="stopReason" required></textarea></label>
+    <p id="stopError" role="alert"></p>
+    <button class="btn" type="submit">发送停止请求</button>
+    <button class="btn gray" type="button" onclick="document.getElementById('stopDialog').close()">取消</button>
+  </form>
+</dialog>
+
+
 <!-- AI 模型预测 -->
 <div class="card" style="margin-top:14px">
-  <h2>AI 模型预测</h2>
+  <h2 id="prediction">模型预测</h2>
   <div class="row" style="margin-bottom:10px">
     <select class="input" id="predictTarget" style="width:auto">
       <option value="growth">生长预测</option>
@@ -57,7 +79,7 @@
 
 <!-- 监控画面 -->
 <div class="card" style="margin-top:14px">
-  <h2>塘口监控</h2>
+  <h2 id="monitor">塘口监控</h2>
   <div class="grid c2" id="cams"></div>
   <div class="row" style="margin-top:10px">
     <video id="camVideo" autoplay playsinline muted
@@ -76,28 +98,6 @@
     结果需人工确认；OCR 需本机安装 tesseract，未安装时明确提示。
   </p>
 </div>
-
-<!-- 投喂记录 -->
-<div class="card" style="margin-top:14px">
-  <div class="row">
-    <h2 style="margin:0">投喂任务记录</h2>
-    <span class="spacer"></span>
-    <span class="muted" id="taskAutoNote">每 5 秒自动刷新</span>
-    <button class="btn sm gray" id="btnRefreshTasks">立即刷新</button>
-  </div>
-  <div id="taskTable" style="margin-top:10px"></div>
-  <div id="taskDetail"></div>
-</div>
-
-<dialog id="stopDialog" style="max-width:480px;width:90%;border:1px solid #ccc;border-radius:10px">
-  <form id="stopForm">
-    <h2>请求停止投喂</h2><p>请求后需等待设备反馈；未反馈时请现场处理。</p>
-    <label>停止原因<textarea class="input" id="stopReason" required></textarea></label>
-    <p id="stopError" role="alert"></p>
-    <button class="btn" type="submit">发送停止请求</button>
-    <button class="btn gray" type="button" onclick="document.getElementById('stopDialog').close()">取消</button>
-  </form>
-</dialog>
 
 <!-- 疑似死鱼事件 -->
 <div class="card" style="margin-top:14px">
@@ -150,6 +150,7 @@ async function loadEnv() {
       label: def.label + (expired ? '（数据已过期）' : ''),
       value: m && m.connected ? m.value : null,
       unit: def.unit, min: def.min, max: def.max, ok: def.ok,
+      source: m?.source, time: m?.collected_at, expired,
     });
   }
 }
@@ -174,13 +175,8 @@ async function loadToday() {
   const days = Object.keys(byDay);
   const avg7 = days.length ? Object.values(byDay).reduce((a, b) => a + b, 0) / days.length : 0;
   $('#todayRings').innerHTML = `
-    <div class="card ring-box" id="ringTask" style="border:none;box-shadow:none"></div>
-    <div class="card ring-box" id="ringFeed" style="border:none;box-shadow:none"></div>`;
-  ring($('#ringTask'), { label: '今日任务完成', value: doneN, max: Math.max(todays.length, 1),
-    unit: ' 项', note: `今日共 ${todays.length} 个投喂任务` });
-  ring($('#ringFeed'), { label: '今日已知实际量 (kg)', value: today.actual_feed_kg || 0,
-    max: Math.max(Math.ceil(avg7 * 2) || 10, today.actual_feed_kg || 0), unit: ' kg',
-    color: '#2e75b6', note: days.length ? `有已知实际量的 ${days.length} 天日均 ${avg7.toFixed(1)} kg` : '暂无历史投喂' });
+    <div class="today-stat"><span>今日已知实际量</span><strong>${today.actual_feed_kg ?? '—'}<small>kg</small></strong><p>${today.unknown_tasks || 0} 个任务实际量待核实</p></div>
+    <div class="today-stat"><span>历史日均用料</span><strong>${days.length ? avg7.toFixed(1) : '—'}<small>kg</small></strong><p>近 7 天内有已知量的 ${days.length} 天</p></div>`;
   $('#todayNote').textContent =
     `今日任务 ${today.tasks} 次，已知实际量 ${today.actual_feed_kg} kg，${today.unknown_tasks || 0} 个任务实际量待核实。`;
 }
@@ -190,10 +186,10 @@ async function loadCharts() {
   if (!r.ok) return;
   const d = r.data;
   const toPts = (arr, unit) => arr.map(x => ({
-    v: x.v, valid: x.valid, label: x.t + ' ' + x.v + unit
+    v: x.v, t: x.t, valid: x.valid, label: x.t + ' ' + x.v + unit
   }));
-  lineChart($('#chartTemp'), [{ name: '水温', color: '#C55A11', unit: '℃', points: toPts(d.temperature, '℃') }]);
-  lineChart($('#chartOxy'), [{ name: '溶氧', color: '#2E75B6', unit: 'mg/L', points: toPts(d.oxygen, ' mg/L') }]);
+  lineChart($('#chartTemp'), [{ name: '水温', color: '#779858', unit: '℃', points: toPts(d.temperature, '℃') }]);
+  lineChart($('#chartOxy'), [{ name: '溶氧', color: '#578e87', unit: 'mg/L', points: toPts(d.oxygen, ' mg/L') }]);
 }
 
 async function loadCams() {

@@ -48,13 +48,15 @@ function lineChart(el, series, opts = {}) {
   const W = opts.width || el.clientWidth || 720;
   const H = opts.height || 220;
   const P = { l: 46, r: 12, t: 14, b: 26 };
-  const all = series.flatMap(s => s.points.map(p => p.v)).filter(v => v != null);
+  const all = series.flatMap(s => s.points.map(p => p.v)).filter(v => Number.isFinite(v));
   if (!all.length) { el.innerHTML = '<div class="empty">暂无数据（未接入或未采集）</div>'; return; }
   let min = Math.min(...all), max = Math.max(...all);
   if (min === max) { min -= 1; max += 1; }
   const pad = (max - min) * 0.1; min -= pad; max += pad;
   const n = Math.max(2, ...series.map(s => s.points.length));
-  const X = i => P.l + (W - P.l - P.r) * (n <= 1 ? 0 : i / (n - 1));
+  const stamps = series.flatMap(s => s.points.map(p => p.t ? Date.parse(p.t.replace(' ', 'T')) : NaN)).filter(Number.isFinite);
+  const startT = Math.min(...stamps), endT = Math.max(...stamps);
+  const X = (i, p) => P.l + (W - P.l - P.r) * (stamps.length && p?.t && endT > startT ? (Date.parse(p.t.replace(' ', 'T')) - startT) / (endT - startT) : i / (n - 1));
   const Y = v => P.t + (H - P.t - P.b) * (1 - (v - min) / (max - min));
 
   let g = `<svg viewBox="0 0 ${W} ${H}" class="chart" preserveAspectRatio="none">`;
@@ -66,74 +68,45 @@ function lineChart(el, series, opts = {}) {
     g += `<text x="${P.l - 6}" y="${y + 4}" text-anchor="end" class="axis">${val}</text>`;
   }
   series.forEach(s => {
-    const pts = s.points.map((p, i) => p.v == null ? null : `${X(i)},${Y(p.v)}`).filter(Boolean);
-    if (!pts.length) return;
-    g += `<polyline fill="none" stroke="${s.color}" stroke-width="2"
-           ${s.dash ? 'stroke-dasharray="7 5"' : ''} points="${pts.join(' ')}"/>`;
+    const segments = []; let segment = [];
+    s.points.forEach((p, i) => {
+      const prev = s.points[i - 1];
+      const gap = p.t && prev?.t && Date.parse(p.t.replace(' ', 'T')) - Date.parse(prev.t.replace(' ', 'T')) > 8 * 3600000;
+      if (p.v == null || p.valid === false || gap) { if (segment.length) segments.push(segment); segment = []; }
+      if (p.v != null && p.valid !== false) segment.push(`${X(i, p)},${Y(p.v)}`);
+    });
+    if (segment.length) segments.push(segment);
+    segments.forEach(pts => { g += `<polyline fill="none" stroke="${s.color}" stroke-width="2" ${s.dash ? 'stroke-dasharray="7 5"' : ''} points="${pts.join(' ')}"/>`; });
     // 无效点单独标记
     s.points.forEach((p, i) => {
       if (p.v == null) return;
       const bad = p.valid === false;
-      g += `<circle cx="${X(i)}" cy="${Y(p.v)}" r="${bad ? 4 : 2.4}" fill="${bad ? '#e04b4b' : s.color}"
+      g += `<circle cx="${X(i, p)}" cy="${Y(p.v)}" r="${bad ? 4 : 2.4}" fill="${bad ? '#e04b4b' : s.color}"
              ${bad ? 'stroke="#fff" stroke-width="1"' : ''}><title>${esc(p.label || '')} ${p.v}${s.unit || ''}${bad ? '（无效）' : ''}</title></circle>`;
     });
   });
+  if (stamps.length && endT > startT) {
+    for (let i = 0; i < 5; i++) {
+      const d = new Date(startT + (endT - startT) * i / 4);
+      g += `<text x="${P.l + (W - P.l - P.r) * i / 4}" y="${H - 6}" text-anchor="middle" class="axis">${d.getMonth() + 1}/${d.getDate()}</text>`;
+    }
+  }
   g += '</svg>';
   el.innerHTML = g + (opts.legend === false ? '' :
     `<div class="legend">${series.map(s => `<span><i style="background:${s.color}"></i>${esc(s.name)}${s.unit ? '（' + s.unit + '）' : ''}</span>`).join('')}
-     <span class="hint">红点=无效值（已排除在建议输入外）</span></div>`);
+     <span class="hint">无效值单独标记；带时间的测量间隔超过8小时断线</span></div>`);
 }
 
 /* ---------------- 仪表盘（半环仪表 + 安全区着色） ----------------
    gauge(el, {label, value, unit, min, max, ok:[lo,hi]})
    值超出 [min,max] 时指针钉在边界并标红；ok 区间为绿色安全区。 */
 function gauge(el, opt) {
-  const W = 210, H = 132, cx = W / 2, cy = 104, R = 80;
-  const min = opt.min ?? 0, max = opt.max ?? 100;
-  const hasVal = opt.value != null && isFinite(opt.value);
-  const v = hasVal ? Math.min(Math.max(opt.value, min), max) : min;
-  const frac = max > min ? (v - min) / (max - min) : 0;
-  const out = hasVal && (opt.value < min || opt.value > max);
-
-  // SVG 的 y 轴向下：取 -sin 让半环画在上方；比例 0=左端，1=右端
-  const pol = deg => [cx + R * Math.cos(deg * Math.PI / 180),
-                      cy - R * Math.sin(deg * Math.PI / 180)];
-  const deg = f => 180 - f * 180;   // 比例 f → 角度
-  // 用折线采样画弧：比 SVG arc 标志位更直观可靠
-  const arc = (f0, f1, color, width) => {
-    if (f1 <= f0) return '';
-    const pts = [];
-    const nSeg = Math.max(6, Math.ceil((f1 - f0) * 36));
-    for (let k = 0; k <= nSeg; k++) {
-      const [x, y] = pol(deg(f0 + (f1 - f0) * k / nSeg));
-      pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
-    }
-    return `<polyline points="${pts.join(' ')}" fill="none" stroke="${color}"
-             stroke-width="${width}" stroke-linecap="round"/>`;
-  };
-  // 底环 + 安全区（默认取量程中段 25%~75%）
-  const okLo = opt.ok ? Math.min(Math.max((opt.ok[0] - min) / (max - min), 0), 1) : 0.25;
-  const okHi = opt.ok ? Math.min(Math.max((opt.ok[1] - min) / (max - min), 0), 1) : 0.75;
-  let svg = `<svg viewBox="0 0 ${W} ${H}" class="gauge">
-    ${arc(0, 1, '#e8edf2', 12)}
-    ${arc(okLo, okHi, '#7fb069', 12)}
-    ${hasVal ? arc(0, frac, out ? '#d94f3d' : '#2e75b6', 12) : ''}`;
-  if (hasVal) {
-    const [nx, ny] = pol(deg(frac));
-    const [bx, by] = pol(deg(frac) + 180);
-    svg += `<line x1="${(cx + (bx - cx) * 0.14).toFixed(1)}" y1="${(cy - (cy - by) * 0.14).toFixed(1)}"
-              x2="${(cx + (nx - cx) * 0.62).toFixed(1)}" y2="${(cy - (cy - ny) * 0.62).toFixed(1)}"
-              stroke="${out ? '#d94f3d' : '#22303c'}" stroke-width="2.5" stroke-linecap="round"/>
-            <circle cx="${cx}" cy="${cy}" r="4" fill="#22303c"/>`;
-  }
-  svg += `<text x="10" y="${H - 4}" class="axis">${min}${opt.unit || ''}</text>
-          <text x="${W - 10}" y="${H - 4}" class="axis" text-anchor="end">${max}${opt.unit || ''}</text>
-          <text x="${cx}" y="${cy - 40}" text-anchor="middle" class="gauge-v"
-                fill="${out ? '#d94f3d' : '#22303c'}">
-            ${hasVal ? opt.value : '未接入'}</text>
-          <text x="${cx}" y="${cy - 26}" text-anchor="middle" class="axis">${hasVal ? (opt.unit || '') : ''}</text>
-        </svg>`;
-  el.innerHTML = `<div class="k">${esc(opt.label || '')}${out ? ' <span class="pill bad">超范围</span>' : ''}</div>${svg}`;
+  const hasValue = opt.value != null && Number.isFinite(Number(opt.value));
+  const percentage = hasValue ? Math.max(0, Math.min(100, (opt.value - opt.min) / (opt.max - opt.min) * 100)) : 0;
+  el.innerHTML = `<div class="row"><span class="k">${esc(opt.label)}</span><span class="spacer"></span><span class="pill ${opt.expired ? 'warn' : ''}">${hasValue ? sourceCN(opt.source) : '未接入'}</span></div>
+    <div class="sensor-reading">${hasValue ? esc(opt.value) : '—'}<small>${esc(opt.unit)}</small></div>
+    <div class="sensor-range"><span style="width:${percentage}%"></span></div>
+    <div class="sensor-foot"><span>${hasValue ? '量程位置 · 非安全评级' : '等待设备数据'}</span><span>${hasValue ? esc(fmtTime(opt.time)) : ''}</span></div>`;
 }
 
 /* ---------------- 环形进度 ----------------
@@ -168,7 +141,7 @@ function barChart(el, items, opts = {}) {
       <span class="bar-name">${esc(x.name)}</span>
       <div class="bar-track">
         <div class="bar-fill" style="width:${(Math.abs(x.value) / maxV * 100).toFixed(1)}%;
-             background:${x.color || 'linear-gradient(90deg,#2e75b6,#548235)'}"></div>
+             background:${x.color || '#91ab72'}"></div>
       </div>
       <span class="bar-val">${x.value}${esc(x.unit || '')}</span>
     </div>`).join('')}</div>
@@ -226,8 +199,8 @@ async function initSimSwitch() {
     const hint = document.getElementById('simHint');
     if (hint) {
       hint.innerHTML = on
-        ? ' · <b>终端仿真已开启</b>：投喂任务会自动应答并跑完闭环。'
-        : ' · <b>终端仿真已关闭</b>：下发后收不到回执，可复现「结果未知（待核查）」异常流程。';
+        ? '仿真终端运行中，投喂任务将返回模拟执行结果。'
+        : '仿真已关闭。下发无回执时，任务将进入待核查。';
     }
     btn.disabled = false;
   }

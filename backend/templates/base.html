@@ -1,47 +1,43 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}白蕉水产养殖管理平台{% endblock %}</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=4">
-</head>
-<body>
-<header class="topbar">
-  <div class="brand">
-    <span class="logo">白蕉</span>
-    <span class="brand-text">水产养殖管理平台</span>
-  </div>
-  <nav class="nav">
-    <a href="/">鱼塘总览</a>
-    <a href="/compare">多塘比较</a>
-    <a href="/community">交流·排行</a>
-    <a href="/review">待核查</a>
-    <a href="/alerts">异常</a>
+{% macro icon(name) -%}
+<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+{% if name == 'grid' %}<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>
+{% elif name == 'chart' %}<path d="M4 3v17h17M8 15V9m5 6V5m5 10v-4"/>
+{% elif name == 'check' %}<rect x="5" y="4" width="15" height="17" rx="2"/><path d="M9 3h7v3H9zM9 13l2 2 5-5"/>
+{% elif name == 'bell' %}<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>
+{% elif name == 'chat' %}<path d="M21 11a8 8 0 0 1-8 8H6l-4 3V11a9 9 0 0 1 19 0Z"/><path d="M7 10h9M7 14h5"/>
+{% elif name == 'arrow' %}<path d="M5 12h14m-5-5 5 5-5 5"/>
+{% elif name == 'refresh' %}<path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M4 12a8 8 0 0 0 14 6"/>
+{% elif name == 'calendar' %}<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 11h18"/>
+{% else %}<path d="M3 8h18M3 12h18M3 16h18"/>{% endif %}</svg>
+{%- endmacro %}
+<!DOCTYPE html><html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}白蕉 · 养殖管理{% endblock %}</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%231e493e'/%3E%3Cpath d='M8 18q6-8 12 0t12 0M8 25q6-8 12 0t12 0' stroke='%23d5edb8' fill='none' stroke-width='3'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=5">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/workspace.css') }}?v=5">
+</head><body>
+<a class="skip-link" href="#mainContent">跳到主要内容</a>
+<aside class="sidebar" id="sidebar">
+  <a class="brand" href="/" aria-label="白蕉养殖管理首页"><svg class="brand-mark" viewBox="0 0 40 40" fill="none" aria-hidden="true"><rect width="40" height="40" rx="12" fill="#d3e9b5"/><path d="M8 16q6-7 12 0t12 0M8 24q6-7 12 0t12 0" stroke="#244b40" stroke-width="2.7" stroke-linecap="round"/></svg><span>白蕉<span class="brand-sub">养殖管理平台</span></span></a>
+  <div class="workspace-tag"><span class="status-dot"></span>智慧渔业 · 3组<span class="tag-small">实训</span></div>
+  <p class="nav-label">工作空间</p>
+  <nav class="nav" aria-label="主导航">
+    {% for path, label, glyph in [('/', '养殖总览', 'grid'), ('/compare', '多塘比较', 'chart'), ('/review', '投喂核查', 'check'), ('/alerts', '异常与日志', 'bell')] %}
+    <a href="{{ path }}" {% if request.path == path or (path == '/' and request.path.startswith('/pond/')) %}class="active" aria-current="page"{% endif %}>{{ icon(glyph) }}<span>{{ label }}</span>{% if path == '/review' %}<span class="nav-count" id="navReview" hidden></span>{% endif %}</a>
+    {% endfor %}
+    <span class="nav-label second">交流空间</span><a href="/community" {% if request.path == '/community' %}class="active" aria-current="page"{% endif %}>{{ icon('chat') }}<span>养殖交流</span><span class="nav-extra">扩展</span></a>
   </nav>
-  <div class="user">
-    <label>当前用户</label>
-    <select id="userSelect"></select>
-  </div>
-  <div class="sim-switch" title="演示开关：控制内嵌终端仿真器">
-    <span class="sim-label">终端仿真</span>
-    <button id="simToggle" class="sim-btn" type="button" aria-pressed="false">
-      <span class="sim-dot"></span><span id="simText">加载中…</span>
-    </button>
-  </div>
-</header>
-<div class="demo-banner">
-  演示数据 / 演示规则：本页展示的数据与建议用于课程联调验证，<b>不得作为实际养殖依据</b>。
-  <span id="simHint"></span>
-</div>
-<main class="wrap">
+  <div class="sidebar-bottom"><div class="sim-switch"><div><span class="sim-label">终端仿真</span><small>课程演示设备</small></div><button id="simToggle" class="sim-btn" type="button" aria-pressed="false" aria-label="切换终端仿真"><span class="sim-dot"></span><span id="simText">加载中</span></button></div><p id="simHint" class="sim-explanation"></p><div class="sidebar-caption">BAIJIAO AQUACULTURE<span>每一口塘，都有据可循。</span></div></div>
+</aside>
+<div class="app-main"><header class="workspace-header">
+  <button class="icon-button mobile-menu" id="menuToggle" aria-label="展开导航" aria-expanded="false">{{ icon('menu') }}</button>
+  <div class="breadcrumb">工作空间<span>/</span><b>{% if request.path == '/' %}养殖总览{% elif request.path.startswith('/pond/') %}单塘管理{% elif request.path == '/compare' %}多塘比较{% elif request.path == '/review' %}投喂核查{% elif request.path == '/alerts' %}异常与日志{% else %}养殖交流{% endif %}</b></div>
+  <div class="header-right"><span class="header-date" id="headerDate"></span><span class="header-divider"></span><span class="avatar" aria-hidden="true">白</span><div class="user"><label for="userSelect">演示身份</label><select id="userSelect" aria-label="切换演示身份"></select></div></div>
+</header><main class="wrap" id="mainContent">
+  <div class="demo-banner"><span class="demo-badge">演示环境</span><span>数据与规则仅用于课程联调，不作为实际养殖依据。</span><span class="demo-source">实测 / 仿真 / 人工记录分别标识</span></div>
   {% block content %}{% endblock %}
-</main>
-<footer class="foot">
-  软件实训课程作业 · 智能渔业-3组 ·
-  <span id="footNote">数据来源：人工 / 仿真 / 实测分别标识</span>
-</footer>
-<script src="{{ url_for('static', filename='js/app.js') }}?v=4"></script>
-{% block script %}{% endblock %}
-</body>
-</html>
+</main><footer class="foot"><span>白蕉水产养殖管理平台</span><span>软件实训课程 · 智能渔业 3组</span></footer></div>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='js/workspace.js') }}?v=5"></script>
+{% block script %}{% endblock %}</body></html>

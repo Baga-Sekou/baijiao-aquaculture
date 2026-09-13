@@ -1,86 +1,22 @@
 {% extends "base.html" %}
-{% block title %}鱼塘总览 · 白蕉水产养殖管理平台{% endblock %}
+{% block title %}养殖总览 · 白蕉{% endblock %}
 {% block content %}
-<h1>鱼塘总览</h1>
-<div id="ponds" class="grid c3"></div>
-<div class="grid c2" style="margin-top:14px">
-  <div class="card"><h2>今日各塘投喂</h2><div id="feedBars"></div></div>
-  <div class="card"><h2>待处理异常分布</h2><div id="alertBars"></div></div>
+<div class="page-heading"><div><div class="eyebrow">FARM OVERVIEW</div><h1>养殖总览</h1><p>查看鱼塘状态、环境变化与今日投喂。</p></div><div class="page-actions"><span class="date-chip">{{ icon('calendar') }}<span id="todayLabel"></span></span><button class="btn" id="refreshOverview" aria-label="刷新数据">{{ icon('refresh') }}刷新数据</button></div></div>
+<div id="overviewError" role="alert" hidden></div>
+<section class="summary-grid" aria-label="养殖关键指标">
+  <div class="summary-card highlight"><div class="summary-label">管理鱼塘{{ icon('grid') }}</div><div class="summary-value"><span id="totalPonds">—</span><small>口</small></div><div class="summary-note" id="pondSummary">读取授权鱼塘…</div></div>
+  <div class="summary-card"><div class="summary-label">今日已知投喂{{ icon('chart') }}</div><div class="summary-value"><span id="totalFeed">—</span><small>kg</small></div><div class="summary-note" id="feedSummary">按设备反馈的已知实际量累计</div></div>
+  <div class="summary-card warning"><div class="summary-label">待处理异常{{ icon('bell') }}</div><div class="summary-value"><span id="totalAlerts">—</span><small>条</small></div><div class="summary-note">查看异常原因与现场处理记录</div></div>
+  <div class="summary-card"><div class="summary-label">在线终端{{ icon('check') }}</div><div class="summary-value"><span id="onlineTerminals">—</span><small id="terminalDenominator">台</small></div><div class="summary-note" id="terminalSummary">以服务端连接状态为准</div></div>
+</section>
+<div class="overview-grid">
+  <section class="card"><div class="section-top"><div><h2>水质变化</h2><p>按实际采样时间展示有效记录</p></div><select id="trendPond" class="subtle-select" aria-label="选择趋势鱼塘"></select></div>
+    <div class="chart-toolbar"><div class="segmented" aria-label="趋势指标"><button data-metric="temperature" aria-pressed="true">水温</button><button data-metric="oxygen" aria-pressed="false">溶氧</button></div><select id="trendDays" class="subtle-select" aria-label="趋势时间范围"><option value="1">近 24 小时</option><option value="7" selected>近 7 天</option><option value="30">近 30 天</option></select></div>
+    <div class="trend-summary"><strong id="trendValue">—</strong><span id="trendUnit">℃</span><span class="trend-detail" id="trendDetail">正在读取测量记录</span></div>
+    <div id="trendChart" class="trend-chart" aria-live="polite"></div><div class="trend-foot"><span><i class="legend-dot"></i><span id="trendLegend">水温测量</span></span><span id="trendSource">—</span></div>
+  </section>
+  <section class="card attention-card"><div class="section-top"><div><h2>待办与提醒 <span id="attentionCount" class="attention-count">—</span></h2><p>先处理需要关注的塘口</p></div><a href="/alerts" class="text-link">全部 {{ icon('arrow') }}</a></div><div id="attentionList" class="attention-list"><div class="loading-state">正在获取待办</div></div><div class="attention-bottom"><span id="reviewSummary">核查任务读取中</span><a href="/review" class="text-link">进入核查 →</a></div></section>
 </div>
-<div class="card" style="margin-top:14px">
-  <h2>运行概览</h2>
-  <div id="overview" class="grid c4"></div>
-  <p class="muted" style="margin-top:8px">
-    在线用户与终端连接数分别统计；未接入的指标显示“未接入”，不填示例值。
-  </p>
-</div>
+<section class="card pond-section"><div class="section-top"><div><h2>我的鱼塘 <span id="pondCount" class="pill">—</span></h2><p>环境、投喂与连接状态，一处查看</p></div><label class="search-box"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="m12 12 5 5"/></svg><input id="pondSearch" placeholder="搜索名称或编号" aria-label="搜索鱼塘"></label></div><div id="ponds" class="table-scroll"><div class="loading-state">正在读取鱼塘数据…</div></div><div class="table-footer"><span id="tableCount">—</span><span id="lastUpdated">等待更新</span></div></section>
 {% endblock %}
-{% block script %}
-<script>
-async function load() {
-  const r = await API.get('/api/ponds');
-  const box = $('#ponds');
-  if (!r.ok) { box.innerHTML = `<div class="empty">${esc(r.message || '加载失败')}</div>`; return; }
-  if (!r.data.length) { box.innerHTML = '<div class="empty">当前用户没有可访问的鱼塘</div>'; return; }
-
-  const cards = [];
-  const cardsGauges = [];
-  const feedBars = [], alertBars = [];
-  for (const p of r.data) {
-    const d = await API.get(`/api/ponds/${p.id}/dashboard`);
-    const env = (d.ok && d.data.env) || {};
-    const t = env.temperature || {};
-    const o = env.oxygen || {};
-    const alerts = (d.ok && d.data.pending_alerts) || [];
-    const today = (d.ok && d.data.today) || {};
-    const tempBad = t.connected && t.expired;
-    feedBars.push({ name: p.name, value: today.actual_feed_kg || 0, unit: ' kg' });
-    alertBars.push({ name: p.name, value: alerts.length, unit: ' 条',
-                     color: alerts.length ? 'linear-gradient(90deg,#C55A11,#d94f3d)' : undefined });
-    cards.push(`
-      <div class="card">
-        <div class="row">
-          <h2 style="margin:0">${esc(p.name)}</h2>
-          <span class="spacer"></span>
-          <span class="pill ${p.terminal && p.terminal.status === 'online' ? 'ok' : 'bad'}">
-            终端${p.terminal ? statusCN(p.terminal.status) : '未注册'}</span>
-        </div>
-        <p class="muted">编号 ${esc(p.code)} · 规模 ${p.area || '—'}${esc(p.area_unit || '')} ·
-           批次 ${p.active_batch ? esc(p.active_batch.code) : '—'}</p>
-        <div class="grid c2" style="margin:8px 0">
-          <div id="gauge_t_${p.id}" class="gauge-wrap"></div>
-          <div id="gauge_o_${p.id}" class="gauge-wrap"></div>
-        </div>
-        <p class="muted">今日任务 ${today.tasks || 0} 次 · 已知实际量 ${today.actual_feed_kg || 0} kg · ${today.unknown_tasks || 0} 个任务实际量待核实</p>
-        ${alerts.length ? `<p><span class="pill bad">待处理异常 ${alerts.length}</span></p>` : '<p><span class="pill ok">无待处理异常</span></p>'}
-        <a class="btn" href="/pond/${p.id}">进入单塘看板</a>
-      </div>`);
-    cardsGauges.push({ id: p.id, t, o, tempBad });
-  }
-  box.innerHTML = cards.join('');
-  for (const g of cardsGauges) {
-    gauge($(`#gauge_t_${g.id}`), { label: '水温' + (g.tempBad ? '（已过期）' : ''),
-      value: g.t.connected ? g.t.value : null, unit: '℃', min: 0, max: 40, ok: [24, 28] });
-    gauge($(`#gauge_o_${g.id}`), { label: '溶氧',
-      value: g.o.connected ? g.o.value : null, unit: 'mg/L', min: 0, max: 20, ok: [5, 16] });
-  }
-
-  const o = await API.get('/api/ponds/1/dashboard');
-  if (o.ok) {
-    $('#overview').innerHTML = `
-      <div class="metric"><div class="k">在线用户</div><div class="v">${o.data.online_users.users}</div>
-        <div class="s">近 ${o.data.online_users.window_min} 分钟内有操作</div></div>
-      <div class="metric"><div class="k">在线终端</div><div class="v">${o.data.online_users.terminals_online}</div>
-        <div class="s">按连接状态计数</div></div>
-      <div class="metric"><div class="k">导入数据</div><div class="v">2 年</div>
-        <div class="s">2024–2025 课堂 CSV</div></div>
-      <div class="metric"><div class="k">演示数据</div><div class="v">已标识</div>
-        <div class="s">来源：人工/仿真/实测分列</div></div>`;
-  }
-  $('#feedBars').innerHTML = '';
-  barChart($('#feedBars'), feedBars, { note: '今日已确认投喂量（按确认量累计）' });
-  barChart($('#alertBars'), alertBars, { note: '待处理异常条数' });
-}
-document.addEventListener('DOMContentLoaded', load);
-</script>
-{% endblock %}
+{% block script %}<script src="{{ url_for('static', filename='js/overview.js') }}?v=5"></script>{% endblock %}
