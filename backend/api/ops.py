@@ -159,7 +159,9 @@ def charts(pond_id):
                 .filter(Measurement.pond_id == pond_id, Measurement.metric == metric,
                         Measurement.collected_at >= since)
                 .order_by(Measurement.collected_at).all())
-        return [{"t": m.collected_at.strftime("%Y-%m-%d"), "v": m.value,
+        # 必须带时刻：只给日期会让同一天的多次采样时刻相同，
+        # 前端按时间戳定位时会把整天数据压成一条竖线。
+        return [{"t": m.collected_at.strftime("%Y-%m-%d %H:%M:%S"), "v": m.value,
                  "unit": m.unit, "valid": m.valid, "source": m.source} for m in rows]
 
     feed_rows = (g.db.query(FeedingTask)
@@ -170,7 +172,8 @@ def charts(pond_id):
         "temperature": series("temperature"),
         "oxygen": series("oxygen"),
         "ph": series("ph"),
-        "feed": [{"t": f.created_at.strftime("%Y-%m-%d"),
+        # 任务按天聚合，日期即可（同一任务不会一天内多条同号）
+        "feed": [{"t": f.created_at.strftime("%Y-%m-%d %H:%M:%S"),
                   "suggested": f.suggested_amount, "confirmed": f.confirm_amount,
                   "actual": f.actual_amount, "unit": f.unit, "status": f.status}
                  for f in feed_rows],

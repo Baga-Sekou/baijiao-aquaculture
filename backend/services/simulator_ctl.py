@@ -53,10 +53,36 @@ class _Stop:
         self.flag = threading.Event()
 
 
+def _sample_interval_sec():
+    """读配置里的环境采集周期（默认 600 秒）。
+
+    采集是「每 N 秒一次」，而任务轮询是「每几秒一次」——两者不是一回事。
+    若跟着轮询频率采集（每 3 秒一条），一天会写入约 2.8 万条，
+    把演示数据密度彻底淹没，趋势图只看得到最近一小段。
+    """
+    try:
+        from database import SessionLocal
+        from services.common import cfg_float
+        db = SessionLocal()
+        try:
+            v = cfg_float(db, "sample_interval_sec", 600)
+            return float(v) if v and v > 0 else 600.0
+        finally:
+            db.close()
+    except Exception:                             # noqa: BLE001
+        return 600.0
+
+
 def _run_terminals(codes_ponds, interval, stop, port):
-    """在后台线程里跑若干仿真终端，直到 stop 被置位。"""
+    """在后台线程里跑若干仿真终端，直到 stop 被置位。
+
+    任务轮询按 interval（数秒）；环境采集按配置的采集周期（默认 600 秒），
+    两者分开计时，避免高频写入污染演示数据。
+    """
     Terminal = _terminal_cls()
     terms = []
+    sample_every = _sample_interval_sec()
+    last_sample = 0.0
     try:
         for code, pond_id in codes_ponds:
             t = Terminal(code, pond_id, interval=interval, base=_base_url(port))
@@ -67,13 +93,22 @@ def _run_terminals(codes_ponds, interval, stop, port):
         if not terms:
             print("[sim] 没有终端启动成功")
             return
-        print(f"[sim] 已启动 {len(terms)} 个仿真终端，间隔 {interval}s")
+        print(f"[sim] 已启动 {len(terms)} 个仿真终端："
+              f"任务轮询 {interval}s，环境采集 {sample_every:g}s（按 sample_interval_sec 配置）")
+        # 启动时先采一次，让页面立刻有数据
+        for t in terms:
+            t.collect_once()
+        last_sample = time.time()
+
         while not stop.flag.is_set():
             for t in terms:
                 t.heartbeat()
-                t.collect_once()
+                if time.time() - last_sample >= sample_every:
+                    t.collect_once()
                 for task in t.poll_tasks():
                     t.handle_task(task)
+            if time.time() - last_sample >= sample_every:
+                last_sample = time.time()
             # 分段 sleep，便于快速停止
             for _ in range(int(interval * 10)):
                 if stop.flag.is_set():

@@ -54,13 +54,15 @@ def log(*a):
 
 class Terminal:
     def __init__(self, code, pond_id, fault=None, interval=10, dry_run=False,
-                 base=None, state_dir=None, execution_seconds=2):
+                 base=None, state_dir=None, execution_seconds=2, sample_interval=None):
         self.code = code
         self.pond_id = pond_id
         self.fault = fault
         self.interval = interval
         self.dry_run = dry_run
         self.base = base or BASE
+        # 环境采集周期（秒）；None 时由 run() 按轮询间隔推算
+        self.sample_interval = sample_interval
         # 重启去重日志：按 (后端地址, 终端编号) 分文件，避免多终端互相覆盖
         state_dir = Path(state_dir or Path(__file__).resolve().parents[1] / "data" / "terminal-state")
         key = hashlib.sha256(f"{self.base}|{code}".encode()).hexdigest()[:24]
@@ -204,15 +206,21 @@ class Terminal:
             return
         log(f"终端 {self.code} 启动（鱼塘 {self.pond_id}，故障注入={self.fault or '无'}）")
         t0 = time.time()
-        cycle = 0
+
+        # 采集周期与轮询周期分开：轮询要快（及时取任务），
+        # 采集要慢（真实传感器通常每 10 分钟一次）。若跟着轮询频率采集，
+        # 一天会写入数万条，趋势图只剩最近一小段。
+        sample_every = self.sample_interval or self.interval * 3
+        last_sample = 0.0
+        log(f"环境采集周期 {sample_every:g}s，任务轮询 {self.interval:g}s")
+
         while not self.stopped.is_set():
             if dur_sec and time.time() - t0 > dur_sec:
                 break
-            cycle += 1
             self.heartbeat()
-            # 采集（每 3 个循环一次，避免刷屏）
-            if cycle % 3 == 0:
+            if time.time() - last_sample >= sample_every:
                 self.collect_once()
+                last_sample = time.time()
             for task in self.poll_tasks():
                 self.handle_task(task)
             time.sleep(self.interval)
