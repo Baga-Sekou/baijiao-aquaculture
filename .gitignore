@@ -25,3 +25,7 @@ backend/static/frames/
 
 # 微信开发者工具本地个人配置（各人不同，不入库）
 miniprogram/project.private.config.json
+
+# 本地浏览器验收产物
+.playwright-cli/
+output/playwright/
