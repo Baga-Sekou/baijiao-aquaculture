@@ -13,6 +13,27 @@
   <span class="muted">超时巡检：把已下发但超时未回执的任务标记为结果未知。</span>
 </div>
 <div class="card"><div id="list"></div></div>
+<dialog id="reviewDialog" style="max-width:600px;width:90%;border:1px solid #ccc;border-radius:10px">
+  <form id="reviewForm">
+    <h2 id="reviewTitle">核查任务</h2>
+    <pre id="reviewEvidence" style="white-space:pre-wrap;max-height:180px;overflow:auto"></pre>
+    <label>核查依据（必填）<textarea class="input" id="reviewBasis" required></textarea></label>
+    <label>现场证据说明<textarea class="input" id="reviewFieldEvidence"></textarea></label>
+    <label>核查结论<select class="input" id="reviewConclusion">
+      <option value="unknown">仍无法确定</option><option value="done">已完成</option>
+      <option value="stopped">已停止</option><option value="failed">失败</option>
+      <option value="not_executed">未执行</option>
+    </select></label>
+    <p>需要解除设备占用时，填写恢复依据并逐项核实。结果仍不明时不能解除占用。</p>
+    <textarea class="input" id="recoveryBasis" placeholder="设备恢复依据（不解除占用可留空）"></textarea>
+    <p><label><input type="checkbox" id="terminalIdle">已确认终端无该任务在执行</label></p>
+    <p><label><input type="checkbox" id="oldCommandDisabled">已确认旧指令不会继续执行</label></p>
+    <p><label><input type="checkbox" id="deviceReady">已确认设备可用</label></p>
+    <p id="reviewError" role="alert"></p>
+    <button class="btn" type="submit">保存核查记录</button>
+    <button class="btn gray" type="button" onclick="document.getElementById('reviewDialog').close()">取消</button>
+  </form>
+</dialog>
 {% endblock %}
 {% block script %}
 <script>
@@ -31,28 +52,47 @@ async function load() {
           ${t.actual_amount == null ? '未获取' : t.actual_amount} ${esc(t.unit)}</td>
       <td>${t.device_locked ? '<span class="pill bad">占用中</span>' : '<span class="pill ok">已释放</span>'}</td>
       <td class="muted">${(t.receipts || []).map(x => esc(x.kind) + (x.late ? '·迟到' : '')).join('、') || '无'}</td>
-      <td>${t.device_locked ? `<button class="btn sm" onclick="openReview('${esc(t.task_no)}')">核查</button>` : '<span class="muted">已结束</span>'}</td>
+      <td>${['unknown','failed','done','stopped'].includes(t.status) ? `<button class="btn sm" onclick="openReview('${esc(t.task_no)}')">核查</button>` : '<span class="muted">已结束</span>'}</td>
     </tr>`).join('')}</tbody></table>`;
 }
 
+let reviewingTask = null;
 async function openReview(tn) {
-  const basis = prompt(`核查任务 ${tn}\n请填写核查依据（如：查询终端执行记录 / 现场查看）：`, '查询终端执行记录，结合现场查看');
-  if (basis === null) return;
-  const c = prompt('结论（done=已完成 / stopped=已停止 / failed=失败 / not_executed=未执行 / unknown=仍不明）：', 'not_executed');
-  if (!c) return;
-  const rec = (c === 'unknown') ? null :
-    prompt('设备恢复依据（填写后解除设备占用）：', '终端已无该任务，旧指令不再执行，设备可用');
-  const r = await API.post(`/api/tasks/${tn}/review`, {
-    conclusion: c, basis, evidence: '现场取证', device_recovery: rec,
-  });
+  const r = await API.get(`/api/tasks/${tn}`);
   if (!r.ok) { toast(r.message, 'err'); return; }
-  toast(`核查完成：${statusCN(r.data.status)}，设备占用${r.data.device_locked ? '未释放（仍不明）' : '已解除'}`, 'ok');
+  reviewingTask = tn;
+  $('#reviewForm').reset();
+  $('#reviewError').textContent = '';
+  $('#reviewTitle').textContent = `核查任务 ${tn}`;
+  $('#reviewEvidence').textContent = JSON.stringify({
+    状态: statusCN(r.data.status), 回执: r.data.receipts, 历史核查: r.data.reviews
+  }, null, 2);
+  $('#reviewDialog').showModal();
+}
+
+async function submitReview(event) {
+  event.preventDefault();
+  const r = await API.post(`/api/tasks/${reviewingTask}/review`, {
+    conclusion: $('#reviewConclusion').value,
+    basis: $('#reviewBasis').value.trim(),
+    evidence: $('#reviewFieldEvidence').value.trim() || null,
+    device_recovery: $('#recoveryBasis').value.trim() || null,
+    recovery_checks: {
+      terminal_idle: $('#terminalIdle').checked,
+      old_command_disabled: $('#oldCommandDisabled').checked,
+      device_ready: $('#deviceReady').checked,
+    },
+  });
+  if (!r.ok) { $('#reviewError').textContent = r.message; return; }
+  $('#reviewDialog').close();
+  toast(`核查已保存：${statusCN(r.data.status)}，设备${r.data.device_locked ? '仍占用' : '已解除占用'}`, 'ok');
   load();
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   load();
   $('#filter').onchange = load;
+  $('#reviewForm').onsubmit = submitReview;
   $('#btnTimeout').onclick = async () => {
     const r = await API.post('/api/tasks/check-timeouts');
     if (!r.ok) { toast(r.message, 'err'); return; }
