@@ -136,3 +136,32 @@ label.fld { display: block; font-size: 12.5px; color: var(--muted); margin-botto
   .nav { order: 3; width: 100%; overflow-x: auto; }
   .metric .v { font-size: 20px; }
 }
+
+/* ---------------- 演示开关：终端仿真器 ---------------- */
+.sim-switch { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.sim-label { color: #cfe0ef; }
+.sim-btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 5px 13px; border-radius: 999px; cursor: pointer;
+  border: 1px solid #5b7a99; background: #17324d; color: #cfe0ef;
+  font-size: 13px; font-family: inherit; transition: all .15s;
+}
+.sim-btn:hover { filter: brightness(1.15); }
+.sim-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #7b8a99; box-shadow: 0 0 0 0 rgba(112,173,71,.6);
+}
+.sim-btn.on { background: #2f6b3a; border-color: #70ad47; color: #fff; }
+.sim-btn.on .sim-dot {
+  background: #8ee06a;
+  animation: simPulse 1.6s infinite;
+}
+.sim-btn:disabled { opacity: .65; cursor: progress; }
+@keyframes simPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(142,224,106,.65); }
+  70%  { box-shadow: 0 0 0 7px rgba(142,224,106,0); }
+  100% { box-shadow: 0 0 0 0 rgba(142,224,106,0); }
+}
+@media (max-width: 900px) {
+  .sim-switch { order: 4; width: 100%; }
+}

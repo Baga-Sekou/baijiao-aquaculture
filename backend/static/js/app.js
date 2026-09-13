@@ -211,3 +211,41 @@ function localToday() {
 }
 
 document.addEventListener('DOMContentLoaded', initUserSelect);
+
+/* ---------------- 演示开关：终端仿真器 ---------------- */
+async function initSimSwitch() {
+  const btn = document.getElementById('simToggle');
+  if (!btn) return;
+
+  async function refresh() {
+    const r = await API.get('/api/simulator/status');
+    const on = !!(r.ok && r.data && r.data.running);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.classList.toggle('on', on);
+    document.getElementById('simText').textContent = on ? '运行中' : '已关闭';
+    const hint = document.getElementById('simHint');
+    if (hint) {
+      hint.innerHTML = on
+        ? ' · <b>终端仿真已开启</b>：投喂任务会自动应答并跑完闭环。'
+        : ' · <b>终端仿真已关闭</b>：下发后收不到回执，可复现「结果未知（待核查）」异常流程。';
+    }
+    btn.disabled = false;
+  }
+
+  btn.disabled = true;
+  btn.onclick = async () => {
+    btn.disabled = true;
+    const on = btn.getAttribute('aria-pressed') === 'true';
+    const r = await API.post(on ? '/api/simulator/stop' : '/api/simulator/start', {});
+    if (!r.ok) toast(r.message || '操作失败', 'err');
+    else toast(r.message || (on ? '已关闭仿真终端' : '已开启仿真终端'), 'ok');
+    if (window.__simTimer) clearInterval(window.__simTimer);
+    await refresh();
+  };
+
+  await refresh();
+  // 仿真终端由后端线程运行，页面刷新后状态仍需保持同步
+  window.__simTimer = setInterval(refresh, 5000);
+}
+
+document.addEventListener('DOMContentLoaded', initSimSwitch);

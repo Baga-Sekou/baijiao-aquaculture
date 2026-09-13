@@ -191,6 +191,12 @@ def receive_receipt(db, payload):
     is_late = reviewed is not None and task.status in ("done", "stopped", "failed", "unknown") \
         and reviewed.conclusion in ("done", "stopped", "failed", "not_executed")
 
+    # 实际量来源：终端可声明 source。
+    # 仿真/估算值不得冒充实测（需求书 5.3「汇总不得伪装成实测值」）：
+    # 只有声明 simulated 才记为 simulated，其余默认为真机实测。
+    declared = (payload.get("source") or "").strip().lower()
+    actual_source = "simulated" if declared in ("sim", "simulated", "simulate") else "measured"
+
     r = Receipt(
         task_id=task.id, kind=kind, status=status,
         actual_amount=actual, fault=payload.get("fault"),
@@ -248,7 +254,7 @@ def receive_receipt(db, payload):
         task.finished_at = now()
         if actual is not None:
             task.actual_amount = actual
-            task.actual_source = "measured"
+            task.actual_source = actual_source
         else:
             task.actual_amount = None
             task.actual_source = "unknown"    # 不用确认量补齐
@@ -258,7 +264,7 @@ def receive_receipt(db, payload):
         task.finished_at = now()
         if actual is not None:
             task.actual_amount = actual
-            task.actual_source = "measured"
+            task.actual_source = actual_source
         task.device_locked = False
 
     audit(db, "task", f"receipt_{kind}", pond_id=task.pond_id, task_id=task.id,

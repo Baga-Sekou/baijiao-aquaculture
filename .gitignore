@@ -21,3 +21,6 @@ Thumbs.db
 # 训练出的模型与上传帧（运行产物，可重新生成）
 data/models/
 backend/static/frames/
+
+# 微信开发者工具本地个人配置（各人不同，不入库）
+miniprogram/project.private.config.json

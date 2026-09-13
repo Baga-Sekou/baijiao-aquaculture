@@ -26,6 +26,7 @@ from api.monitor import bp as monitor_bp
 from api.ops import bp as ops_bp
 from api.model import bp as model_bp
 from api.community import bp as community_bp
+from api.simulator import bp as simulator_bp
 
 
 def create_app():
@@ -62,6 +63,7 @@ def create_app():
     app.register_blueprint(ops_bp, url_prefix="/api")
     app.register_blueprint(model_bp, url_prefix="/api")
     app.register_blueprint(community_bp, url_prefix="/api")
+    app.register_blueprint(simulator_bp, url_prefix="/api")
 
     # ---------------- 页面（Web 看板 / 移动端响应式） ----------------
     @app.route("/")

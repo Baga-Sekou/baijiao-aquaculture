@@ -1,6 +1,6 @@
 // 全局配置与请求封装
 // 使用前把 BASE_URL 改成电脑局域网 IP（手机与电脑需在同一 WiFi）
-const BASE_URL = 'http://127.0.0.1:5000';
+const BASE_URL = 'http://172.33.13.39:5000';
 const USER_KEY = 'bj_user';
 
 function request(method, path, data) {

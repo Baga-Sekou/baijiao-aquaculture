@@ -29,6 +29,12 @@ import requests
 
 BASE = os.getenv("API_BASE", "http://127.0.0.1:5000")
 
+
+def make_base(port):
+    """给内嵌仿真用：指向本机同一进程监听的端口。"""
+    return f"http://127.0.0.1:{port}"
+
+
 # 模拟传感器基线（演示参数；真实接入时替换为串口/TCP 读数）
 SIM_BASE = {"temperature": 24.0, "oxygen": 6.5, "ph": 7.1, "salinity": 0.22}
 SIM_UNIT = {"temperature": "℃", "oxygen": "mg/L", "ph": "", "salinity": ""}
@@ -40,19 +46,20 @@ def log(*a):
 
 
 class Terminal:
-    def __init__(self, code, pond_id, fault=None, interval=10, dry_run=False):
+    def __init__(self, code, pond_id, fault=None, interval=10, dry_run=False, base=None):
         self.code = code
         self.pond_id = pond_id
         self.fault = fault
         self.interval = interval
         self.dry_run = dry_run
+        self.base = base or BASE
         self.seen_tasks = set()          # 已接收任务号，用于去重（模拟断电重启后从本地恢复）
         self.stopped = threading.Event()
         self.rng = random.Random(hash(code) & 0xffff)
 
     # ---------------------------------------------------------- 注册
     def register(self):
-        r = requests.post(f"{BASE}/api/terminals/register",
+        r = requests.post(f"{self.base}/api/terminals/register",
                           json={"code": self.code, "pond_id": self.pond_id,
                                 "ip": "127.0.0.1",
                                 "devices": ["S-TEMP", "S-OXY", "S-PH", "FEED"]}, timeout=5)
@@ -61,7 +68,7 @@ class Terminal:
 
     def heartbeat(self):
         try:
-            requests.post(f"{BASE}/api/terminals/{self.code}/heartbeat", timeout=5)
+            requests.post(f"{self.base}/api/terminals/{self.code}/heartbeat", timeout=5)
         except requests.RequestException:
             pass
 
@@ -84,10 +91,9 @@ class Terminal:
                 "terminal_code": self.code, "source": "sim",
             }
             try:
-                r = requests.post(f"{BASE}/api/measurements", json=payload, timeout=5)
+                r = requests.post(f"{self.base}/api/measurements", json=payload, timeout=5)
                 if r.ok:
                     d = r.json()
-                    print(".", end="", flush=True)
                 else:
                     log("采集被拒:", r.json().get("message"))
             except requests.RequestException as e:
@@ -96,7 +102,7 @@ class Terminal:
     # ---------------------------------------------------------- 任务
     def poll_tasks(self):
         try:
-            r = requests.get(f"{BASE}/api/terminals/{self.code}/tasks", timeout=5)
+            r = requests.get(f"{self.base}/api/terminals/{self.code}/tasks", timeout=5)
             if not r.ok:
                 return []
             return r.json().get("data", [])
@@ -106,9 +112,12 @@ class Terminal:
     def receipt(self, task_no, kind, status, actual=None, fault=None):
         payload = {"task_no": task_no, "kind": kind, "status": status,
                    "actual_amount": actual, "fault": fault,
+                   # 声明来源为仿真：后端据此把实际量标为 simulated，
+                   # 不冒充实测值（需求书 5.3）
+                   "source": "simulated",
                    "occurred_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         try:
-            r = requests.post(f"{BASE}/api/receipts", json=payload, timeout=5)
+            r = requests.post(f"{self.base}/api/receipts", json=payload, timeout=5)
             return r.ok
         except requests.RequestException:
             return False
@@ -181,7 +190,7 @@ class Terminal:
     def stop(self):
         self.stopped.set()
         try:
-            requests.post(f"{BASE}/api/terminals/{self.code}/offline", timeout=5)
+            requests.post(f"{self.base}/api/terminals/{self.code}/offline", timeout=5)
         except requests.RequestException:
             pass
 
