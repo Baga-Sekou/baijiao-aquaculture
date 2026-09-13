@@ -159,14 +159,69 @@ def seed_tasks(db, pond_id, batch_id, terminal_id, device_id, user_id, count=8):
     return made
 
 
+def seed_pond(db, pond_code, wang, owner, with_tasks=True):
+    """给指定鱼塘灌演示数据（环境曲线 + 可选投喂任务/事件/运营记录）。
+
+    课堂 CSV 只有 A01，A02 没有任何真实读数；这里为 A02 生成 source=sim
+    的演示曲线，使多塘比较有可比对象。数据来源已在界面上标为仿真。
+    """
+    pond = db.query(Pond).filter_by(code=pond_code).first()
+    if not pond:
+        print(f"[skip] 鱼塘 {pond_code} 不存在")
+        return 0, 0
+    batch = db.query(Batch).filter_by(pond_id=pond.id, status="active").first()
+    from models import Device, Terminal
+    term = db.query(Terminal).filter_by(pond_id=pond.id).first()
+    feeder = db.query(Device).filter_by(pond_id=pond.id, kind="feeder").first()
+
+    n_env = seed_env(db, pond.id, batch.id, term.id if term else None)
+    n_env += seed_recent_hours(db, pond.id, batch.id, term.id if term else None)
+
+    if not with_tasks:
+        # 次要鱼塘只给环境曲线，避免与主塘的任务/告警重复刷屏
+        return n_env, 0
+
+    seed_tasks(db, pond.id, batch.id, term.id, feeder.id, wang.id)
+
+    for d in range(5):
+        db.add(FeedingFeedback(pond_id=pond.id, batch_id=batch.id,
+                               state=rng.choice(["hungry", "normal", "full"]),
+                               source="manual",
+                               observed_at=NOW - timedelta(days=d, hours=2)))
+
+    db.add(FishEvent(code=next_code(db, FishEvent, "code", "EV"),
+                     pond_id=pond.id, kind="suspected_death", status="pending",
+                     detected_at=NOW - timedelta(hours=4),
+                     position_desc="水面东北角", observation="识别到疑似死鱼对象",
+                     source="vision", model_version="vision-sim-v1",
+                     confidence=0.86))
+
+    db.add(PlanTask(pond_id=pond.id, cycle="daily", content="清晨巡塘、记录水温与摄食情况",
+                    assignee_id=wang.id, plan_time=NOW.replace(hour=7, minute=0),
+                    due_time=NOW.replace(hour=9, minute=0), completed=True,
+                    completed_at=NOW.replace(hour=8, minute=10)))
+    db.add(PlanTask(pond_id=pond.id, cycle="weekly", content="抽样称重 30 尾",
+                    assignee_id=wang.id, plan_time=NOW, due_time=NOW + timedelta(days=2)))
+    db.add(MedicineRecord(pond_id=pond.id, batch_id=batch.id,
+                          used_at=NOW - timedelta(days=8), item="生石灰",
+                          amount=150, unit="kg", operator_id=wang.id,
+                          note="定期水体消毒"))
+    for i, w in enumerate((51.3, 180.0, 420.0, 640.0, 780.8)):
+        db.add(WeighRecord(pond_id=pond.id, batch_id=batch.id,
+                           weighed_at=NOW - timedelta(days=300 - i * 70),
+                           avg_weight=w, sample_count=30, operator_id=wang.id,
+                           note="定期抽样"))
+    db.add(CostRecord(pond_id=pond.id, batch_id=batch.id, kind="actual",
+                      item="饲料", amount=42000, unit="元", brand="某品牌海鲈料"))
+    db.add(CostRecord(pond_id=pond.id, batch_id=batch.id, kind="plan",
+                      item="预计产出", amount=180000, unit="元"))
+    return n_env, 1
+
+
 def main():
     db = SessionLocal()
     try:
-        pond = db.query(Pond).filter_by(code="A01").first()
-        batch = db.query(Batch).filter_by(pond_id=pond.id, status="active").first()
-        term = db.query(Terminal).filter_by(code="TERM-A01").first()
-        from models import Device, User
-        feeder = db.query(Device).filter_by(pond_id=pond.id, kind="feeder").first()
+        from models import User
         wang = db.query(User).filter_by(username="wang").first()
         owner = db.query(User).filter_by(username="owner").first()
 
@@ -175,48 +230,16 @@ def main():
         db.query(WeighRecord).filter(WeighRecord.note == "定期抽样").delete(synchronize_session=False)
         db.commit()
 
-        n_env = seed_env(db, pond.id, batch.id, term.id)
-        n_env += seed_recent_hours(db, pond.id, batch.id, term.id)
-        seed_tasks(db, pond.id, batch.id, term.id, feeder.id, wang.id)
-
-        # 摄食反馈
-        for d in range(5):
-            db.add(FeedingFeedback(pond_id=pond.id, batch_id=batch.id,
-                                   state=rng.choice(["hungry", "normal", "full"]),
-                                   source="manual",
-                                   observed_at=NOW - timedelta(days=d, hours=2)))
-
-        # 疑似死鱼事件
-        db.add(FishEvent(code=next_code(db, FishEvent, "code", "EV"),
-                         pond_id=pond.id, kind="suspected_death", status="pending",
-                         detected_at=NOW - timedelta(hours=4),
-                         position_desc="水面东北角", observation="识别到疑似死鱼对象",
-                         source="vision", model_version="vision-sim-v1",
-                         confidence=0.86))
-
-        # 运营记录
-        db.add(PlanTask(pond_id=pond.id, cycle="daily", content="清晨巡塘、记录水温与摄食情况",
-                        assignee_id=wang.id, plan_time=NOW.replace(hour=7, minute=0),
-                        due_time=NOW.replace(hour=9, minute=0), completed=True,
-                        completed_at=NOW.replace(hour=8, minute=10)))
-        db.add(PlanTask(pond_id=pond.id, cycle="weekly", content="抽样称重 30 尾",
-                        assignee_id=wang.id, plan_time=NOW, due_time=NOW + timedelta(days=2)))
-        db.add(MedicineRecord(pond_id=pond.id, batch_id=batch.id,
-                              used_at=NOW - timedelta(days=8), item="生石灰",
-                              amount=150, unit="kg", operator_id=wang.id,
-                              note="定期水体消毒"))
-        for i, w in enumerate((51.3, 180.0, 420.0, 640.0, 780.8)):
-            db.add(WeighRecord(pond_id=pond.id, batch_id=batch.id,
-                               weighed_at=NOW - timedelta(days=300 - i * 70),
-                               avg_weight=w, sample_count=30, operator_id=wang.id,
-                               note="定期抽样"))
-        db.add(CostRecord(pond_id=pond.id, batch_id=batch.id, kind="actual",
-                          item="饲料", amount=42000, unit="元", brand="某品牌海鲈料"))
-        db.add(CostRecord(pond_id=pond.id, batch_id=batch.id, kind="plan",
-                          item="预计产出", amount=180000, unit="元"))
+        # A01 为主塘（含 CSV 历史数据），给完整演示集；
+        # A02 只给环境曲线，使多塘比较有可比对象
+        n1, t1 = seed_pond(db, "A01", wang, owner, with_tasks=True)
+        n2, t2 = seed_pond(db, "A02", wang, owner, with_tasks=False)
 
         db.commit()
-        print(f"[ok] 演示数据已生成：环境测量 {n_env} 条 + 投喂任务 10 条 + 告警 2 条 + 事件 1 条")
+        print(f"[ok] 演示数据已生成：")
+        print(f"     A01 环境测量 {n1} 条 + 投喂任务 10 条 + 告警 2 条 + 事件 1 条")
+        print(f"     A02 环境测量 {n2} 条（仅环境曲线，供多塘比较）")
+        print(f"     来源均标为 sim，界面标注为仿真数据")
     finally:
         db.close()
 
