@@ -14,12 +14,14 @@
 <view class="card">
   <view class="title">投喂</view>
   <view class="row">
-    <view class="btn grow" bindtap="suggest">生成投喂建议</view>
+    <button class="btn grow" bindtap="suggest" data-mode="llm" disabled="{{suggesting}}">大模型建议</button>
+    <button class="btn ghost grow" bindtap="suggest" data-mode="rule" disabled="{{suggesting}}">规则建议</button>
     <view class="btn ghost grow" bindtap="predict">生长预测</view>
   </view>
+  <view class="muted" wx:if="{{suggestError}}">{{suggestError}}</view>
   <view wx:if="{{suggestion}}" style="margin-top:16rpx">
     <view class="pill">建议 {{suggestion.amount}}{{suggestion.unit}}</view>
-    <view class="pill">规则 {{suggestion.rule_version}}</view>
+    <view class="pill">{{suggestion.source === 'llm' ? '硅基流动 · ' + suggestion.model : '规则 · ' + suggestion.rule_version}}</view>
     <view class="muted" style="margin:8rpx 0">{{suggestion.reason}}</view>
     <view class="btn" bindtap="confirmTask">确认并下发</view>
   </view>
